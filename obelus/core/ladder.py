@@ -51,6 +51,8 @@ class LadderContext:
     example_input: Optional[Callable[[], Any]] = None
     alpha: float = 0.05
     greater_is_better: bool = True
+    practical_margin: Optional[float] = None
+    target_power: float = 0.8
     mutator_fraction: float = 0.30
     tracker: Tracker = field(default_factory=NullTracker)
     seed: int = 0

@@ -39,6 +39,10 @@ _SUMMARY_COLUMNS = [
     "is_improved",
     "baseline_mean",
     "variant_mean",
+    "mde",
+    "power_at_margin",
+    "adequately_powered",
+    "inconclusive",
     "decision",
 ]
 
@@ -83,6 +87,8 @@ def run_ablation(
     sanity_mutation: bool = True,
     p_alpha: float = 0.05,
     greater_is_better: bool = True,
+    practical_margin: Optional[float] = None,
+    target_power: float = 0.8,
     mutator_fraction: float = 0.30,
     tracker: Optional[Tracker] = None,
     seed: int = 0,
@@ -185,6 +191,16 @@ def run_ablation(
         Metric direction of ``scorer``. ``True`` for accuracy-like metrics;
         ``False`` for loss-like metrics (the comparison is flipped so the same
         engine handles both). Default ``True``.
+    practical_margin:
+        The smallest degradation actually worth caring about, in metric units
+        (e.g. ``0.03`` for "a 3-point F1 drop matters"). Enables the
+        ``power_at_margin`` / ``adequately_powered`` columns, which distinguish a
+        genuine equivalence from a test too weak to detect anything. Strongly
+        recommended: without it, a non-inferior verdict cannot be called
+        conclusive. The ``mde`` column is reported either way.
+    target_power:
+        Power the test should reach against ``practical_margin``, and the level
+        the reported ``mde`` is solved for. Default 0.8.
     mutator_fraction:
         Fraction of each multi-dimensional weight tensor the fire drill zeroes
         when corrupting the baseline. Default 0.30.
@@ -276,6 +292,8 @@ def run_ablation(
         example_input=example_input,
         alpha=p_alpha,
         greater_is_better=greater_is_better,
+        practical_margin=practical_margin,
+        target_power=target_power,
         mutator_fraction=mutator_fraction,
         tracker=tracker or NullTracker(),
         seed=seed,

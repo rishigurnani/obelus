@@ -15,6 +15,7 @@ import torch
 from obelus.core.evaluator import compare_across_slices, evaluate_pair
 from obelus.core.ladder import GateResult, LadderContext
 from obelus.core.mutator import ModelMutator
+from obelus.core.power import analyze_power
 from obelus.core.runner import run_preflight
 from obelus.core.stats import evaluate_non_inferiority
 
@@ -167,6 +168,16 @@ class NonInferiorityGate:
                     greater_is_better=ctx.greater_is_better,
                     seed=ctx.seed,
                 )
+                # Power says whether a "not significantly worse" result is
+                # evidence of absence or merely absence of evidence.
+                power = analyze_power(
+                    pair.baseline,
+                    pair.variant,
+                    alpha=ctx.alpha,
+                    target_power=ctx.target_power,
+                    margin=ctx.practical_margin,
+                    greater_is_better=ctx.greater_is_better,
+                )
                 non_inferior_all &= test.is_non_inferior
                 variant_rows.append(
                     {
@@ -178,6 +189,14 @@ class NonInferiorityGate:
                         "is_improved": test.is_improved,
                         "baseline_mean": test.baseline_mean,
                         "variant_mean": test.variant_mean,
+                        "mde": power.mde,
+                        "power_at_margin": power.power_at_margin,
+                        "adequately_powered": power.adequately_powered,
+                        # A pass that the test could never have failed is not
+                        # evidence; flag it so it is never read as equivalence.
+                        "inconclusive": test.is_non_inferior
+                        and not test.is_improved
+                        and not power.adequately_powered,
                     }
                 )
             decision = "RETAINED" if non_inferior_all else "REJECTED"
@@ -188,8 +207,18 @@ class NonInferiorityGate:
 
         n_retained = sum(d == "RETAINED" for d in decisions.values())
         summary = f"{n_retained}/{len(decisions)} variant(s) retained"
+        n_inconclusive = sum(r["inconclusive"] for r in rows)
+        if n_inconclusive:
+            summary += f"; {n_inconclusive}/{len(rows)} cell(s) underpowered"
         return GateResult(
-            self.name, True, summary, {"rows": rows, "decisions": decisions}
+            self.name,
+            True,
+            summary,
+            {
+                "rows": rows,
+                "decisions": decisions,
+                "n_inconclusive": n_inconclusive,
+            },
         )
 
 

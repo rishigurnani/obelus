@@ -26,11 +26,20 @@ from examples.molnet_ablation.training import fit, predict_proba
 from obelus import run_ablation
 from obelus.adapters import HydraModelFactory
 from obelus.core.discovery import generate_knockouts
+from obelus.core.power import min_achievable_p
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "architecture.yaml"
 # Discovery ablates modules whose _target_ starts with the project's own package
 # (library layers like torch.nn.* are left alone).
 PROJECT_PREFIX = "examples.molnet_ablation."
+
+P_ALPHA = 0.05
+CV_FOLDS = 10
+# The smallest F1 drop worth caring about. Declaring this up front is what makes
+# a non-significant result interpretable: without it, "no difference" cannot be
+# distinguished from "no ability to see a difference".
+PRACTICAL_MARGIN = 0.03
+TARGET_POWER = 0.8
 
 
 def _make_factory(cfg, knockouts, train_batch, train_y, timings, seed=0):
@@ -77,15 +86,19 @@ def _make_scorer(dataset, featurizer):
 
 
 def _verdict(row) -> str:
-    """Three-way label, every branch backed by a significance test.
+    """Four-way label; every branch is backed by a test, including the null one.
 
     Both tails of the paired permutation test are used, so IMPROVED is a real
-    claim (``p_improve < alpha``) rather than "the mean happened to be higher".
-    A variant that is merely indistinguishable from the baseline reads ``same``.
+    claim (``p_improve < alpha``), not "the mean happened to be higher". And a
+    non-significant result is only called ``same`` when the test actually had
+    the power to detect the margin — otherwise it is INCONCLUSIVE, because
+    absence of evidence is not evidence of absence.
     """
     if not row["is_non_inferior"]:
         return "DEGRADED"
-    return "IMPROVED" if row["is_improved"] else "same"
+    if row["is_improved"]:
+        return "IMPROVED"
+    return "same" if row["adequately_powered"] else "INCONCLUSIVE"
 
 
 def main() -> None:
@@ -117,6 +130,18 @@ def main() -> None:
               f"  — {SLICE_DOC[name]}")
     print()
 
+    # Structural check, independent of any data: with n paired folds the test has
+    # only 2**n sign-flip arrangements, so p can never fall below 2**-n. If that
+    # floor exceeds alpha, every slice is guaranteed to pass — vacuously.
+    floor = min_achievable_p(CV_FOLDS)
+    print(f"test capability: {CV_FOLDS} folds -> smallest attainable p = {floor:.4f}"
+          f" vs alpha = {P_ALPHA}"
+          f"  [{'OK' if floor <= P_ALPHA else 'IMPOSSIBLE — cannot reject at this alpha'}]")
+    print(f"  (5 folds would give {min_achievable_p(5):.4f}; 4 folds"
+          f" {min_achievable_p(4):.4f} > {P_ALPHA}, i.e. structurally unable to reject)")
+    print(f"declared meaningful degradation: {PRACTICAL_MARGIN:.3f} F1"
+          f" at {TARGET_POWER:.0%} power\n")
+
     timings: dict[str, float] = {}
     result = run_ablation(
         cfg,
@@ -130,11 +155,13 @@ def main() -> None:
         # Models train once, so "folds" are seeded evaluation bootstraps that give
         # the paired permutation test its variance. 10 -> 2^10 arrangements, far
         # finer p-value resolution than 5 folds (2^5=32, min p=0.031).
-        cv_folds=10,
+        cv_folds=CV_FOLDS,
         sanity_mutation=True,
         mutator_fraction=0.5,
-        p_alpha=0.05,
+        p_alpha=P_ALPHA,
         greater_is_better=True,  # F1: higher is better
+        practical_margin=PRACTICAL_MARGIN,
+        target_power=TARGET_POWER,
         seed=0,
     )
 
@@ -152,21 +179,32 @@ def main() -> None:
         print(f"ladder halted at '{result.report.halted_at}'; no decisions produced")
     else:
         print("does each component earn its place? (mean F1 across folds)")
-        header = (f"  {'ablation':22s} {'slice':16s} {'full_F1':>8s} {'abl_F1':>8s}"
-                  f" {'p_deg':>7s} {'p_impr':>7s}  verdict")
+        header = (f"  {'ablation':20s} {'slice':15s} {'full_F1':>7s} {'abl_F1':>7s}"
+                  f" {'p_deg':>6s} {'p_impr':>6s} {'MDE':>6s} {'power':>6s}  verdict")
         print(header)
         print("  " + "-" * (len(header) - 2))
         for _, row in df.iterrows():
             print(
-                f"  {row['variant']:22s} {row['slice']:16s} "
-                f"{row['baseline_mean']:8.3f} {row['variant_mean']:8.3f} "
-                f"{row['p_degrade']:7.3f} {row['p_improve']:7.3f}  {_verdict(row)}"
+                f"  {row['variant']:20s} {row['slice']:15s} "
+                f"{row['baseline_mean']:7.3f} {row['variant_mean']:7.3f} "
+                f"{row['p_degrade']:6.3f} {row['p_improve']:6.3f} "
+                f"{row['mde']:6.3f} {row['power_at_margin']:6.2f}  {_verdict(row)}"
             )
         print(
-            "\n  verdict key (alpha = 0.05), both tails of the paired permutation test:\n"
-            "    DEGRADED  removing the component significantly hurt   (p_deg  < alpha)\n"
-            "    IMPROVED  removing it significantly helped            (p_impr < alpha)\n"
-            "    same      no significant difference either way"
+            f"\n  verdict key (alpha = {P_ALPHA}), both tails of the paired permutation"
+            " test, plus power:\n"
+            "    DEGRADED      removing the component significantly hurt   (p_deg  < alpha)\n"
+            "    IMPROVED      removing it significantly helped            (p_impr < alpha)\n"
+            f"    same          no significant difference, and the test COULD have seen a"
+            f" {PRACTICAL_MARGIN:.3f} drop\n"
+            "    INCONCLUSIVE  no significant difference, but the test was too weak to"
+            " tell — do not\n"
+            "                  read this as equivalence; add folds or shrink the slice's"
+            " noise\n"
+            f"\n  MDE   = smallest F1 drop this slice could detect at {TARGET_POWER:.0%}"
+            " power (lower is better)\n"
+            f"  power = probability of catching a {PRACTICAL_MARGIN:.3f} F1 drop, the"
+            " margin declared as meaningful"
         )
         print("\ncomponent verdicts — REJECTED means the ablation degraded a slice,"
               "\ni.e. the component is load-bearing and must be kept:")

@@ -12,6 +12,7 @@ from obelus.core.ladder import (
     VerificationLadder,
 )
 from obelus.core.mutator import ModelMutator
+from obelus.core.power import PowerReport, analyze_power, min_achievable_p
 from obelus.core.stats import evaluate_non_inferiority
 
 __all__ = [
@@ -20,6 +21,9 @@ __all__ = [
     "generate_knockouts",
     "ModelMutator",
     "evaluate_non_inferiority",
+    "analyze_power",
+    "min_achievable_p",
+    "PowerReport",
     "default_gates",
     "VerificationLadder",
     "LadderContext",
