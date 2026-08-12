@@ -36,13 +36,13 @@ class ContractGate:
     name = "contracts"
 
     def run(self, ctx: LadderContext, prior: list[GateResult]) -> GateResult:
-        if ctx.input_shape is None:
+        inputs = ctx.build_inputs()
+        if inputs is None:
             return GateResult(self.name, True, _SKIP_NO_SHAPE)
-        dummy = torch.randn(*ctx.input_shape)
         try:
             ctx.baseline_model.eval()
             with torch.no_grad():
-                ctx.baseline_model(dummy)
+                ctx.baseline_model(*inputs)
         except Exception as exc:
             return GateResult(self.name, False, f"contract violation: {exc}")
         return GateResult(self.name, True, "contracts satisfied on baseline forward pass")
@@ -54,13 +54,14 @@ class PreflightGate:
     name = "preflight"
 
     def run(self, ctx: LadderContext, prior: list[GateResult]) -> GateResult:
-        if ctx.input_shape is None:
+        inputs = ctx.build_inputs()
+        if inputs is None:
             return GateResult(self.name, True, _SKIP_NO_SHAPE)
         # run_preflight takes an optimizer step, so test a throwaway clone rather
         # than perturb the (possibly already-trained) baseline shared downstream.
         probe = copy.deepcopy(ctx.baseline_model)
         try:
-            run_preflight(probe, ctx.input_shape)
+            run_preflight(probe, example_inputs=inputs)
         except Exception as exc:
             return GateResult(self.name, False, f"pre-flight failed: {exc}")
         return GateResult(self.name, True, "gradients flow; no NaN/Inf from finite inputs")
@@ -173,6 +174,8 @@ class NonInferiorityGate:
                         "slice": pair.slice_name,
                         "p_degrade": test.p_degrade,
                         "is_non_inferior": test.is_non_inferior,
+                        "p_improve": test.p_improve,
+                        "is_improved": test.is_improved,
                         "baseline_mean": test.baseline_mean,
                         "variant_mean": test.variant_mean,
                     }

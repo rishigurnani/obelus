@@ -34,6 +34,17 @@ dev = ["pytest>=8.0", "mlflow>=2.9", "mutmut>=2.4"]
 [tool.setuptools.packages.find]
 include = ["obelus*"]
 
+[tool.mutmut]
+# mutmut 3.x takes its configuration here rather than from CLI flags (the
+# --paths-to-mutate / --tests-dir options were removed).
+# obelus.core.mutator mutates *models* at runtime; mutmut mutates obelus's own
+# logic, and the stats engine is the highest-stakes module to keep honest.
+# source_paths is the tree copied into the mutants/ sandbox, so it must be the
+# whole importable package; only_mutate narrows what actually gets mutated.
+source_paths = ["obelus"]
+only_mutate = ["obelus/core/stats.py"]
+pytest_add_cli_args_test_selection = ["tests/test_stats.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]

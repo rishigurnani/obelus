@@ -14,3 +14,6 @@ mlruns/
 mlartifacts/
 obelus_reports/
 example.csv
+mutants/
+.mutmut-cache
+mutmut-stats.json

@@ -38,3 +38,12 @@ def test_active_toggle_is_disabled():
 def test_library_module_is_not_ablated():
     knockouts = generate_knockouts(_cfg())
     assert "no_norm" not in knockouts
+
+
+def test_custom_prefixes_are_configurable():
+    cfg = OmegaConf.create(
+        {"model": {"enc": {"_target_": "myproj.layers.Encoder"}}}
+    )
+    assert "no_enc" not in generate_knockouts(cfg)  # default prefix is "src."
+    knockouts = generate_knockouts(cfg, custom_prefixes=("myproj.",))
+    assert knockouts["no_enc"] == {"model.enc._target_": "torch.nn.Identity"}

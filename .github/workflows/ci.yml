@@ -19,4 +19,9 @@ jobs:
       - name: Mutation test the statistical engine
         # obelus.core.mutator handles runtime *model* mutation; mutmut verifies
         # obelus's own logic — the stats engine is the highest-stakes module.
-        run: .venv/bin/mutmut run --paths-to-mutate=obelus/core/stats.py --tests-dir=tests/
+        # mutmut 3.x is configured in pyproject.toml ([tool.mutmut]); the old
+        # --paths-to-mutate/--tests-dir flags no longer exist.
+        run: .venv/bin/mutmut run
+      - name: Mutation results
+        if: always()
+        run: .venv/bin/mutmut results

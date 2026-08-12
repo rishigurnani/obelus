@@ -18,12 +18,19 @@ __all__ = ["DegradationTest", "evaluate_non_inferiority"]
 
 @dataclass(frozen=True)
 class DegradationTest:
-    """Outcome of a single baseline-vs-variant comparison on one slice."""
+    """Outcome of a single baseline-vs-variant comparison on one slice.
+
+    Both tails of the same paired permutation test are reported, because "not
+    significantly worse" and "significantly better" are different claims and a
+    mean gap alone justifies neither.
+    """
 
     p_degrade: float
     is_non_inferior: bool
     baseline_mean: float
     variant_mean: float
+    p_improve: float
+    is_improved: bool
 
 
 def evaluate_non_inferiority(
@@ -47,6 +54,12 @@ def evaluate_non_inferiority(
     chance, ``p_degrade``. The variant is deemed **non-inferior** when a
     degradation is *not* statistically significant, i.e. ``p_degrade >= alpha``.
 
+    The opposite tail of the same test is reported as ``p_improve``, so an
+    *improvement* can be stated with the same rigour: ``is_improved`` requires
+    ``p_improve < alpha``, never merely a higher mean. Non-inferiority and
+    improvement are distinct claims — most non-inferior variants are simply
+    indistinguishable from the baseline, not better than it.
+
     ``greater_is_better`` flips the comparison so the same engine handles
     lower-is-better metrics (loss) without a second code path.
     """
@@ -68,27 +81,34 @@ def evaluate_non_inferiority(
         # variant - baseline; a significantly negative value => degradation.
         return np.mean(x, axis=axis) - np.mean(y, axis=axis)
 
-    diffs = v_o - b_o
-    if np.allclose(diffs, diffs[0]):
-        # Constant paired differences give the permutation test no variation to
-        # work with (it would emit a degenerate p-value). Decide directly: a
-        # uniform drop is a certain degradation; anything else is not.
-        p_degrade = 0.0 if diffs[0] < 0 else 1.0
-    else:
+    def one_tailed(alternative: str) -> float:
         res = stats.permutation_test(
             (v_o, b_o),
             statistic=statistic,
             permutation_type="samples",  # paired sign-flip permutations
             vectorized=True,
             n_resamples=n_resamples,
-            alternative="less",  # tests variant < baseline (degradation)
+            alternative=alternative,
             rng=seed,
         )
-        p_degrade = float(res.pvalue)
+        return float(res.pvalue)
+
+    diffs = v_o - b_o
+    if np.allclose(diffs, diffs[0]):
+        # Constant paired differences give the permutation test no variation to
+        # work with (it would emit a degenerate p-value). Decide directly: a
+        # uniform shift is certain in its direction; no shift is neither.
+        p_degrade = 0.0 if diffs[0] < 0 else 1.0
+        p_improve = 0.0 if diffs[0] > 0 else 1.0
+    else:
+        p_degrade = one_tailed("less")  # variant < baseline (degradation)
+        p_improve = one_tailed("greater")  # variant > baseline (improvement)
 
     return DegradationTest(
         p_degrade=p_degrade,
         is_non_inferior=p_degrade >= alpha,
         baseline_mean=float(b.mean()),
         variant_mean=float(v.mean()),
+        p_improve=p_improve,
+        is_improved=p_improve < alpha,
     )

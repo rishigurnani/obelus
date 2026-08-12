@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 from omegaconf import DictConfig
@@ -35,6 +35,8 @@ _SUMMARY_COLUMNS = [
     "slice",
     "p_degrade",
     "is_non_inferior",
+    "p_improve",
+    "is_improved",
     "baseline_mean",
     "variant_mean",
     "decision",
@@ -76,6 +78,7 @@ def run_ablation(
     model_factory: Optional[ModelFactory] = None,
     variants: Optional[dict[str, dict[str, Any]]] = None,
     input_shape: Optional[tuple[int, ...]] = None,
+    example_input: Optional[Callable[[], Any]] = None,
     cv_folds: int = 5,
     sanity_mutation: bool = True,
     p_alpha: float = 0.05,
@@ -158,8 +161,15 @@ def run_ablation(
         added automatically if missing.
     input_shape:
         Full input shape *including the batch dimension*, e.g. ``(8, 16, 512)``.
-        Drives the dummy tensors for gates 1–2; when ``None`` those two gates are
-        reported as skipped-but-passed rather than run.
+        Drives the dummy tensors for gates 1–2. Ignored when ``example_input`` is
+        given; when both are ``None`` those two gates are reported as
+        skipped-but-passed rather than run.
+    example_input:
+        Zero-arg callable returning a tensor, or a tuple of tensors, to feed
+        gates 1–2. Use this for **multi-input models** (a molecular net taking
+        graph tensors plus token ids, an encoder/decoder pair) whose forward
+        signature ``input_shape`` cannot express. During fuzzing the first
+        floating-point tensor is perturbed and the rest are held fixed.
     cv_folds:
         Number of cross-validation folds (``scorer`` is called with
         ``fold`` in ``range(cv_folds)``). Needs at least 2 for the permutation
@@ -263,6 +273,7 @@ def run_ablation(
         slices=slices,
         folds=cv_folds,
         input_shape=input_shape,
+        example_input=example_input,
         alpha=p_alpha,
         greater_is_better=greater_is_better,
         mutator_fraction=mutator_fraction,

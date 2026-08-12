@@ -45,6 +45,21 @@ def test_all_gates_run_when_passing():
     assert report.halted_at is None
 
 
+def test_build_inputs_prefers_example_input_over_shape():
+    import torch
+
+    ctx = _ctx()
+    assert ctx.build_inputs() is None  # neither supplied -> gates skip
+
+    ctx.input_shape = (2, 8)
+    single = ctx.build_inputs()
+    assert len(single) == 1 and single[0].shape == (2, 8)
+
+    ctx.example_input = lambda: (torch.zeros(3, 4), torch.ones(3, dtype=torch.bool))
+    multi = ctx.build_inputs()
+    assert len(multi) == 2 and multi[1].dtype == torch.bool
+
+
 def test_preflight_gate_does_not_mutate_baseline():
     import torch
     import torch.nn as nn

@@ -11,8 +11,9 @@ evolves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
+import torch
 import torch.nn as nn
 
 from obelus.core.seams import ModelFactory, Scorer
@@ -47,11 +48,28 @@ class LadderContext:
     slices: list[str]
     folds: int = 5
     input_shape: Optional[tuple[int, ...]] = None
+    example_input: Optional[Callable[[], Any]] = None
     alpha: float = 0.05
     greater_is_better: bool = True
     mutator_fraction: float = 0.30
     tracker: Tracker = field(default_factory=NullTracker)
     seed: int = 0
+
+    def build_inputs(self) -> Optional[tuple]:
+        """Return positional forward() args for gates 1-2, or ``None`` to skip.
+
+        ``example_input`` wins when set: it returns a tensor (or tuple of them)
+        and is the way to verify multi-input models — molecular nets taking
+        graphs plus token ids, encoder/decoder pairs, anything whose forward
+        signature is not one tensor. ``input_shape`` remains the shorthand for
+        the common single-tensor case.
+        """
+        if self.example_input is not None:
+            built = self.example_input()
+            return built if isinstance(built, tuple) else (built,)
+        if self.input_shape is not None:
+            return (torch.randn(*self.input_shape),)
+        return None
 
 
 @runtime_checkable

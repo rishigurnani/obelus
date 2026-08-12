@@ -54,10 +54,12 @@ print(summary_df)                  # summary_df.attrs["ladder_report"] holds the
 
 ## Example
 
-[`examples/`](examples/README.md) gates three architectures — a 2D-descriptor MLP
-baseline vs. a graph net and a SMILES transformer — on the real **BACE-1
-active/inactive** dataset, across five failure-mode slices. Runs offline on a CPU
-in ~30 s:
+[`examples/`](examples/README.md) asks whether every component of a molecular
+architecture earns its place, on the real **BACE-1 active/inactive** dataset.
+A single Hydra YAML declares the model (2D-descriptor branch + GNN + SMILES
+Transformer + learned fusion); obelus discovers each architectural decision and
+auto-generates one knockout per decision, then gates them across five
+failure-mode slices. Runs offline on a CPU in ~32 s:
 
 ```bash
 uv pip install --python .venv -e ".[examples]"
