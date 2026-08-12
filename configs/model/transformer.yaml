@@ -1,0 +1,17 @@
+# Example Hydra model config. Custom `src.*` modules and `active` toggles are
+# auto-discovered by obelus.core.discovery to build the knockout matrix.
+_target_: src.models.Transformer
+dim: 512
+depth: 6
+attn:
+  _target_: src.layers.CustomAttention
+  dim: 512
+ffn:
+  _target_: src.layers.GatedFFN
+  dim: 512
+norm:
+  _target_: torch.nn.LayerNorm  # library module: not ablated
+  normalized_shape: 512
+dropout:
+  active: true
+  p: 0.1

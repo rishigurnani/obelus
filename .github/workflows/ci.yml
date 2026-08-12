@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Create environment
+        run: uv venv --python 3.14 .venv
+      - name: Install
+        run: uv pip install --python .venv -e ".[dev]"
+      - name: Test suite
+        run: .venv/bin/python -m pytest -q
+      - name: Mutation test the statistical engine
+        # obelus.core.mutator handles runtime *model* mutation; mutmut verifies
+        # obelus's own logic — the stats engine is the highest-stakes module.
+        run: .venv/bin/mutmut run --paths-to-mutate=obelus/core/stats.py --tests-dir=tests/

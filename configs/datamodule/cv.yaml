@@ -1,0 +1,6 @@
+# Example cross-validation datamodule. obelus overrides `current_fold` at
+# runtime as it sweeps the 5 folds; your Scorer consumes this to load data.
+_target_: src.data.CrossValidationDataModule
+dataset_path: "data/benchmark"
+cv_folds: 5
+current_fold: 0  # overridden dynamically by obelus during the execution loop
