@@ -90,10 +90,18 @@ arrangements → fine p-value resolution). **F1 is the guiding metric.**
 
 A variant here is an *ablation*, so the verdicts inverts in a useful way:
 
-- **REJECTED** — removing the component significantly hurt some slice ⇒ the
-  component is **load-bearing, keep it**.
-- **RETAINED** — the model was non-inferior without it ⇒ that component is not
-  justified by this benchmark.
+You must declare `EFFECT_SIZE` — the move that actually counts (0.10 F1 here).
+obelus requires it; there is no default, because "is this difference real?" is
+unanswerable until you say what size of difference matters.
+
+A variant must **earn its place**: RETAINED requires a `FORWARD` leap on at
+least one slice *and* no `BACKWARD` slice anywhere. Being merely harmless is not
+enough — `ON_PAR` everywhere is REJECTED.
+
+- **RETAINED** — removing the component measurably *helps* somewhere and hurts
+  nowhere ⇒ the removal earns its place.
+- **REJECTED** — either some slice went BACKWARD (the component is
+  **load-bearing, keep it**) or nothing improved (no reason to change).
 
 Per row, **both tails** of the same paired permutation test are reported, so
 every label is a significance claim rather than a mean comparison — and the
@@ -101,13 +109,18 @@ every label is a significance claim rather than a mean comparison — and the
 
 | Label | Condition | Meaning |
 |---|---|---|
-| `DEGRADED` | `p_degrade < alpha` | removing the component significantly hurt |
-| `IMPROVED` | `p_improve < alpha` | removing it significantly helped |
-| `same` | neither, and adequately powered | genuinely no difference — *evidence of absence* |
-| `INCONCLUSIVE` | neither, but underpowered | the test could not have seen the margin — *absence of evidence* |
+| `BACKWARD` | significantly worse by ≥ δ | a real regression — rejects the ablation |
+| `FORWARD` | significantly better by ≥ δ | a real gain |
+| `ON_PAR` | neither leap established | the move is smaller than δ, or not significant |
+| `*` suffix | `ON_PAR` but underpowered | the test could not have seen δ — *absence of evidence* |
 
-A higher mean F1 is **not** enough to earn `IMPROVED` — a slice can drift up by
-0.003 on pure noise, and that reads `same`.
+Both conditions must hold: a difference counts only when it is **large enough to
+matter** *and* **statistically significant**. A 0.003 drift never labels, and
+neither does a statistically clean 0.03 drop when δ = 0.10.
+
+Testing against δ is not new machinery: it is the same paired permutation test
+with the baseline shifted by ±δ, so `classify_effect` just calls
+`evaluate_non_inferiority` twice.
 
 ## Is each test adequately powered?
 
@@ -120,29 +133,22 @@ opposite ends, which is why their headers name the value each is evaluated at:
 
 - **`MDE@80%`** — fix power at 80%, solve for the effect: the smallest F1 drop
   the slice can detect. Lower is better; a large MDE means it is too noisy to trust.
-- **`pwr@0.030`** — fix the effect at the declared meaningful drop
-  (`PRACTICAL_MARGIN`), solve for power. Below `TARGET_POWER` (0.8), a
-  non-significant result is reported `INCONCLUSIVE` rather than `same`.
+- **`pwr@0.100`** — fix the effect at the declared `EFFECT_SIZE`, solve for
+  power. Below `TARGET_POWER` (0.8), an `ON_PAR` row is starred (`*`) because it
+  cannot be read as equivalence.
 
-They cannot disagree: `pwr@0.030 >= 0.8` exactly when `MDE@80% <= 0.030`.
+The same δ drives both the labels and the power, so they cannot drift apart:
+`pwr@0.100 >= 0.8` exactly when `MDE@80% <= 0.100`.
 
 **Neither is evaluated at the observed difference.** A row showing a 0.006 drop
-with `MDE@80% = 0.013` and `pwr@0.030 = 1.00` is consistent, not contradictory —
-0.030 > 0.013, so its power necessarily exceeds 0.8. Power *at* the observed
-effect (0.28 here) is post-hoc power: a monotone restatement of the p-value that
-always calls non-significant results underpowered, so obelus never reports it.
+with `MDE@80% = 0.013` and `pwr@0.100 = 1.00` is consistent, not contradictory —
+0.100 > 0.013, so its power necessarily exceeds 0.8. Power *at* the observed
+effect is post-hoc power: a monotone restatement of the p-value that always calls
+non-significant results underpowered, so obelus never reports it.
 
-The distinction is not academic. Two rows can carry near-identical verdicts and
-mean opposite things:
-
-```
-no_descriptor_branch lipophilic  0.368 0.356  p_deg 0.324  MDE 0.070  power 0.28  INCONCLUSIVE
-no_graph_encoder     in_distrib. 0.785 0.779  p_deg 0.141  MDE 0.013  power 1.00  same
-```
-
-Both are non-significant. The first slice could not have detected a 3-point F1
-drop if one existed; the second would have caught it essentially always. Only
-the second is evidence of equivalence.
+The distinction is not academic. Two `ON_PAR` rows can mean opposite things — one
+is evidence the component is dispensable, the other only evidence that the slice
+is too noisy to say.
 
 Power here is closed-form (noncentral *t*), so it costs ~4 ms for all 25 cells
 rather than the thousands of resamples a Monte-Carlo estimate would need.

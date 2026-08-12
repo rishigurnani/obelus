@@ -33,14 +33,13 @@ __all__ = ["AblationResult", "run_ablation", "AutoAblate"]
 _SUMMARY_COLUMNS = [
     "variant",
     "slice",
-    "p_degrade",
-    "is_non_inferior",
-    "p_improve",
-    "is_improved",
+    "label",
+    "p_backward",
+    "p_forward",
     "baseline_mean",
     "variant_mean",
     "mde",
-    "power_at_margin",
+    "power_at_effect",
     "adequately_powered",
     "inconclusive",
     "decision",
@@ -87,7 +86,7 @@ def run_ablation(
     sanity_mutation: bool = True,
     p_alpha: float = 0.05,
     greater_is_better: bool = True,
-    practical_margin: Optional[float] = None,
+    effect_size: float,
     target_power: float = 0.8,
     mutator_fraction: float = 0.30,
     tracker: Optional[Tracker] = None,
@@ -117,9 +116,10 @@ def run_ablation(
        (skipped when ``sanity_mutation=False``).
     4. ``cv_sweep``        — baseline vs. each knockout variant is scored across
        all ``(slice, fold)`` cells and logged to ``tracker``.
-    5. ``non_inferiority`` — a one-tailed paired permutation test decides each
-       variant RETAINED (non-inferior on every slice) or REJECTED (a
-       statistically significant degradation on at least one slice).
+    5. ``non_inferiority`` — each slice is classified FORWARD / ON_PAR /
+       BACKWARD against ``effect_size``. A variant is RETAINED only if it is
+       FORWARD on at least one slice and BACKWARD on none; ON_PAR everywhere is
+       REJECTED, because a variant must earn its place, not merely avoid harm.
 
     Gates 1–3 validate the *baseline* architecture and the benchmark itself;
     gates 4–5 are the actual ablation analysis. A REJECTED variant is a normal
@@ -292,7 +292,7 @@ def run_ablation(
         example_input=example_input,
         alpha=p_alpha,
         greater_is_better=greater_is_better,
-        practical_margin=practical_margin,
+        effect_size=effect_size,
         target_power=target_power,
         mutator_fraction=mutator_fraction,
         tracker=tracker or NullTracker(),

@@ -35,10 +35,11 @@ PROJECT_PREFIX = "examples.molnet_ablation."
 
 P_ALPHA = 0.05
 CV_FOLDS = 10
-# The smallest F1 drop worth caring about. Declaring this up front is what makes
-# a non-significant result interpretable: without it, "no difference" cannot be
-# distinguished from "no ability to see a difference".
-PRACTICAL_MARGIN = 0.03
+# The effect size that counts as a real move, declared up front and required by
+# obelus. Everything is judged against it: a gain of >= this is a FORWARD leap, a
+# loss of >= this is BACKWARD, anything between is ON_PAR. It also sets the power
+# analysis, so "on par" means "and we could have seen a 0.1 move".
+EFFECT_SIZE = 0.10
 TARGET_POWER = 0.8
 
 
@@ -85,22 +86,6 @@ def _make_scorer(dataset, featurizer):
     return scorer
 
 
-def _verdict(row) -> str:
-    """Four-way label; every branch is backed by a test, including the null one.
-
-    Both tails of the paired permutation test are used, so IMPROVED is a real
-    claim (``p_improve < alpha``), not "the mean happened to be higher". And a
-    non-significant result is only called ``same`` when the test actually had
-    the power to detect the margin — otherwise it is INCONCLUSIVE, because
-    absence of evidence is not evidence of absence.
-    """
-    if not row["is_non_inferior"]:
-        return "DEGRADED"
-    if row["is_improved"]:
-        return "IMPROVED"
-    return "same" if row["adequately_powered"] else "INCONCLUSIVE"
-
-
 def main() -> None:
     start = time.perf_counter()
 
@@ -139,7 +124,7 @@ def main() -> None:
           f"  [{'OK' if floor <= P_ALPHA else 'IMPOSSIBLE — cannot reject at this alpha'}]")
     print(f"  (5 folds would give {min_achievable_p(5):.4f}; 4 folds"
           f" {min_achievable_p(4):.4f} > {P_ALPHA}, i.e. structurally unable to reject)")
-    print(f"declared meaningful degradation: {PRACTICAL_MARGIN:.3f} F1"
+    print(f"declared meaningful degradation: {EFFECT_SIZE:.3f} F1"
           f" at {TARGET_POWER:.0%} power\n")
 
     timings: dict[str, float] = {}
@@ -160,7 +145,7 @@ def main() -> None:
         mutator_fraction=0.5,
         p_alpha=P_ALPHA,
         greater_is_better=True,  # F1: higher is better
-        practical_margin=PRACTICAL_MARGIN,
+        effect_size=EFFECT_SIZE,
         target_power=TARGET_POWER,
         seed=0,
     )
@@ -183,45 +168,48 @@ def main() -> None:
         # two are inverse readings of one power curve, and an unqualified
         # "power" invites reading it as power at the observed difference.
         header = (f"  {'ablation':20s} {'slice':15s} {'full_F1':>7s} {'abl_F1':>7s}"
-                  f" {'p_deg':>6s} {'p_impr':>6s} {'MDE@' + format(TARGET_POWER, '.0%'):>8s}"
-                  f" {'pwr@' + format(PRACTICAL_MARGIN, '.3f'):>9s}  verdict")
+                  f" {'p_back':>6s} {'p_fwd':>6s} {'MDE@' + format(TARGET_POWER, '.0%'):>8s}"
+                  f" {'pwr@' + format(EFFECT_SIZE, '.3f'):>9s}  verdict")
         print(header)
         print("  " + "-" * (len(header) - 2))
         for _, row in df.iterrows():
             print(
                 f"  {row['variant']:20s} {row['slice']:15s} "
                 f"{row['baseline_mean']:7.3f} {row['variant_mean']:7.3f} "
-                f"{row['p_degrade']:6.3f} {row['p_improve']:6.3f} "
-                f"{row['mde']:8.3f} {row['power_at_margin']:9.2f}  {_verdict(row)}"
+                f"{row['p_backward']:6.3f} {row['p_forward']:6.3f} "
+                f"{row['mde']:8.3f} {row['power_at_effect']:9.2f}  {row['label']}"
+                f"{'*' if row['inconclusive'] else ''}"
             )
         print(
-            f"\n  verdict key (alpha = {P_ALPHA}), both tails of the paired permutation"
-            " test, plus power:\n"
-            "    DEGRADED      removing the component significantly hurt   (p_deg  < alpha)\n"
-            "    IMPROVED      removing it significantly helped            (p_impr < alpha)\n"
-            f"    same          no significant difference, and the test COULD have seen a"
-            f" {PRACTICAL_MARGIN:.3f} drop\n"
-            "    INCONCLUSIVE  no significant difference, but the test was too weak to"
-            " tell — do not\n"
-            "                  read this as equivalence; add folds or shrink the slice's"
-            " noise\n"
+            f"\n  verdict key — every label is judged against the declared effect size"
+            f" {EFFECT_SIZE:.3f} (alpha = {P_ALPHA}):\n"
+            f"    BACKWARD  significantly WORSE  by >= {EFFECT_SIZE:.3f}  (p_back < alpha)"
+            " -> rejects the ablation\n"
+            f"    FORWARD   significantly BETTER by >= {EFFECT_SIZE:.3f}  (p_fwd  < alpha)\n"
+            f"    ON_PAR    neither leap established: the move is smaller than"
+            f" {EFFECT_SIZE:.3f}, or not significant\n"
+            f"    *         ON_PAR but underpowered — the test could not have seen a"
+            f" {EFFECT_SIZE:.3f} move,\n"
+            "              so do not read it as equivalence; add folds or reduce the"
+            " slice's noise\n"
             f"\n  Both power columns read ONE curve (power rises with effect size),"
             " from opposite ends:\n"
             f"    MDE@{TARGET_POWER:.0%}   fix power at {TARGET_POWER:.0%}, solve for the"
             " effect -> smallest F1 drop this slice can detect\n"
-            f"    pwr@{PRACTICAL_MARGIN:.3f}  fix the effect at {PRACTICAL_MARGIN:.3f}"
+            f"    pwr@{EFFECT_SIZE:.3f}  fix the effect at {EFFECT_SIZE:.3f}"
             " (the drop declared meaningful), solve for power\n"
-            f"  So pwr@{PRACTICAL_MARGIN:.3f} exceeds {TARGET_POWER:.0%} exactly when"
-            f" MDE@{TARGET_POWER:.0%} < {PRACTICAL_MARGIN:.3f} — they are consistent by"
+            f"  So pwr@{EFFECT_SIZE:.3f} exceeds {TARGET_POWER:.0%} exactly when"
+            f" MDE@{TARGET_POWER:.0%} < {EFFECT_SIZE:.3f} — they are consistent by"
             " construction.\n"
             "  Neither is evaluated at the OBSERVED difference: power at the observed"
             " effect is post-hoc\n"
             "  power, a monotone restatement of the p-value that adds no information."
         )
-        print("\ncomponent verdicts — REJECTED means the ablation degraded a slice,"
-              "\ni.e. the component is load-bearing and must be kept:")
+        print("\ncomponent verdicts — an ablation is accepted only if removing the"
+              "\ncomponent is FORWARD on at least one slice and BACKWARD on none:")
         for variant, decision in result.report.get("non_inferiority").data["decisions"].items():
-            keep = "KEEP component" if decision == "REJECTED" else "component not justified"
+            keep = ("removal earns its place" if decision == "RETAINED"
+                    else "KEEP component")
             print(f"  => {variant:22s} {decision:9s} ({keep})")
 
     print("\ntraining time per variant (s): " +

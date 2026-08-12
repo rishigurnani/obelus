@@ -17,7 +17,7 @@ from obelus.core.ladder import GateResult, LadderContext
 from obelus.core.mutator import ModelMutator
 from obelus.core.power import analyze_power
 from obelus.core.runner import run_preflight
-from obelus.core.stats import evaluate_non_inferiority
+from obelus.core.stats import BACKWARD, FORWARD, ON_PAR, classify_effect, evaluate_non_inferiority
 
 __all__ = [
     "ContractGate",
@@ -142,10 +142,14 @@ class CrossValidationSweepGate:
 
 
 class NonInferiorityGate:
-    """Gate 5 — decide RETAINED/REJECTED per variant via the permutation test.
+    """Gate 5 — decide RETAINED/REJECTED per variant against the declared effect size.
 
-    A variant is RETAINED iff it is non-inferior on *every* slice; a single
-    significant degradation (``p_degrade < alpha``) rejects it.
+    Each slice is classified FORWARD / ON_PAR / BACKWARD relative to
+    ``ctx.effect_size``. A variant is RETAINED iff it is **FORWARD on at least
+    one slice and BACKWARD on none** — it must earn its place with a real gain,
+    not merely avoid harm, so a variant that is ON_PAR everywhere is rejected.
+    Sub-threshold wobble neither earns nor rejects: a move counts only when it is
+    both large enough to matter and statistically significant.
     """
 
     name = "non_inferiority"
@@ -158,48 +162,49 @@ class NonInferiorityGate:
         rows: list[dict] = []
         decisions: dict[str, str] = {}
         for variant_name, pairs in sweep.items():
-            non_inferior_all = True
+            no_backward, any_forward = True, False
             variant_rows: list[dict] = []
             for pair in pairs:
-                test = evaluate_non_inferiority(
+                effect = classify_effect(
                     pair.baseline,
                     pair.variant,
+                    ctx.effect_size,
                     alpha=ctx.alpha,
                     greater_is_better=ctx.greater_is_better,
                     seed=ctx.seed,
                 )
-                # Power says whether a "not significantly worse" result is
-                # evidence of absence or merely absence of evidence.
+                # The same declared delta drives power, so ON_PAR can be read as
+                # evidence of absence rather than absence of evidence.
                 power = analyze_power(
                     pair.baseline,
                     pair.variant,
                     alpha=ctx.alpha,
                     target_power=ctx.target_power,
-                    margin=ctx.practical_margin,
+                    margin=ctx.effect_size,
                     greater_is_better=ctx.greater_is_better,
                 )
-                non_inferior_all &= test.is_non_inferior
+                no_backward &= effect.label != BACKWARD
+                any_forward |= effect.label == FORWARD
                 variant_rows.append(
                     {
                         "variant": variant_name,
                         "slice": pair.slice_name,
-                        "p_degrade": test.p_degrade,
-                        "is_non_inferior": test.is_non_inferior,
-                        "p_improve": test.p_improve,
-                        "is_improved": test.is_improved,
-                        "baseline_mean": test.baseline_mean,
-                        "variant_mean": test.variant_mean,
+                        "label": effect.label,
+                        "p_backward": effect.p_backward,
+                        "p_forward": effect.p_forward,
+                        "baseline_mean": effect.baseline_mean,
+                        "variant_mean": effect.variant_mean,
                         "mde": power.mde,
-                        "power_at_margin": power.power_at_margin,
+                        "power_at_effect": power.power_at_margin,
                         "adequately_powered": power.adequately_powered,
-                        # A pass that the test could never have failed is not
+                        # ON_PAR the test could never have contradicted is not
                         # evidence; flag it so it is never read as equivalence.
-                        "inconclusive": test.is_non_inferior
-                        and not test.is_improved
+                        "inconclusive": effect.label == ON_PAR
                         and not power.adequately_powered,
                     }
                 )
-            decision = "RETAINED" if non_inferior_all else "REJECTED"
+            # Earn-your-place rule: a real gain somewhere, a regression nowhere.
+            decision = "RETAINED" if (any_forward and no_backward) else "REJECTED"
             decisions[variant_name] = decision
             for row in variant_rows:
                 row["decision"] = decision

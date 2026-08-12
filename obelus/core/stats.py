@@ -13,7 +13,14 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.stats as stats
 
-__all__ = ["DegradationTest", "evaluate_non_inferiority"]
+__all__ = [
+    "DegradationTest",
+    "EffectClass",
+    "evaluate_non_inferiority",
+    "classify_effect",
+]
+
+FORWARD, ON_PAR, BACKWARD = "FORWARD", "ON_PAR", "BACKWARD"
 
 
 @dataclass(frozen=True)
@@ -112,3 +119,52 @@ def evaluate_non_inferiority(
         p_improve=p_improve,
         is_improved=p_improve < alpha,
     )
+
+
+@dataclass(frozen=True)
+class EffectClass:
+    """Where a variant lands relative to a *declared* meaningful effect size."""
+
+    label: str  # FORWARD | ON_PAR | BACKWARD
+    p_forward: float
+    p_backward: float
+    baseline_mean: float
+    variant_mean: float
+
+
+def classify_effect(
+    baseline_scores: list[float],
+    variant_scores: list[float],
+    effect_size: float,
+    alpha: float = 0.05,
+    *,
+    greater_is_better: bool = True,
+    seed: int | None = None,
+) -> EffectClass:
+    """Classify a variant against a meaningful ``effect_size`` delta.
+
+    A difference only counts once it is both **large enough to matter** and
+    **statistically significant**, which is what the bare non-inferiority test
+    cannot express: it treats any drop as a regression, however trivial.
+
+    No new statistics are involved — testing against a margin is the same paired
+    permutation test with the baseline shifted by the margin, so this runs
+    :func:`evaluate_non_inferiority` against ``b - delta`` and ``b + delta``:
+
+    * ``BACKWARD`` — significantly worse than ``baseline - delta``
+    * ``FORWARD``  — significantly better than ``baseline + delta``
+    * ``ON_PAR``   — neither leap is established
+    """
+    if effect_size <= 0:
+        raise ValueError("effect_size must be > 0; declare the delta that matters")
+    b = np.asarray(baseline_scores, dtype=float)
+    shift = (1.0 if greater_is_better else -1.0) * effect_size
+    kwargs = dict(alpha=alpha, greater_is_better=greater_is_better, seed=seed)
+    back = evaluate_non_inferiority(b - shift, variant_scores, **kwargs)
+    fwd = evaluate_non_inferiority(b + shift, variant_scores, **kwargs)
+    label = (
+        BACKWARD if back.p_degrade < alpha
+        else FORWARD if fwd.p_improve < alpha
+        else ON_PAR
+    )
+    return EffectClass(label, fwd.p_improve, back.p_degrade, float(b.mean()), back.variant_mean)

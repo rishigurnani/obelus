@@ -31,6 +31,7 @@ def test_ablation_logs_runs_and_gate_metrics(monkeypatch, tmp_path):
         slices=["val_full", "slice_noisy"],
         input_shape=(4, DIM),
         db_path=db,
+        effect_size=0.05,
         seed=0,
     )
 

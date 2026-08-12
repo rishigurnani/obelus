@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from obelus.core.stats import evaluate_non_inferiority
+from obelus.core.stats import classify_effect, evaluate_non_inferiority
 
 
 def test_clear_degradation_is_flagged():
@@ -150,3 +150,34 @@ def test_seed_makes_pvalue_reproducible():
     a = evaluate_non_inferiority(baseline, variant, seed=42)
     b = evaluate_non_inferiority(baseline, variant, seed=42)
     assert a.p_degrade == b.p_degrade
+
+
+def test_effect_classification_three_way():
+    """Sub-threshold moves are ON_PAR; only >= delta leaps are labelled."""
+    base = [0.50, 0.60, 0.70, 0.80, 0.90]
+    tiny = [0.49, 0.59, 0.69, 0.78, 0.89]  # consistent but small drop
+    big = [0.30, 0.41, 0.49, 0.61, 0.69]  # consistent ~0.20 drop
+    gain = [0.70, 0.81, 0.89, 1.00, 1.10]  # consistent ~0.20 gain
+    assert classify_effect(base, tiny, 0.10).label == "ON_PAR"
+    assert classify_effect(base, big, 0.10).label == "BACKWARD"
+    assert classify_effect(base, gain, 0.10).label == "FORWARD"
+
+
+def test_significant_but_trivial_drop_is_on_par():
+    """The old zero-margin test rejected this; with a delta it is noise."""
+    base = [0.50, 0.60, 0.70, 0.80, 0.90]
+    variant = [0.48, 0.59, 0.68, 0.79, 0.88]
+    assert evaluate_non_inferiority(base, variant, seed=0).is_non_inferior is False
+    assert classify_effect(base, variant, 0.10, seed=0).label == "ON_PAR"
+
+
+def test_effect_size_must_be_declared_positive():
+    with pytest.raises(ValueError):
+        classify_effect([0.5, 0.6], [0.4, 0.5], 0.0)
+
+
+def test_classification_respects_metric_direction():
+    base = [0.50, 0.60, 0.70, 0.80, 0.90]
+    lower = [0.30, 0.41, 0.49, 0.61, 0.69]  # lower values
+    assert classify_effect(base, lower, 0.10).label == "BACKWARD"  # F1: worse
+    assert classify_effect(base, lower, 0.10, greater_is_better=False).label == "FORWARD"
