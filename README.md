@@ -18,6 +18,14 @@ Execution halts immediately when a gate fails, saving compute:
 4. **5-fold cross-validation sweep** — baseline vs. knockout variants across failure-mode slices.
 5. **Non-inferiority decision** — one-tailed paired permutation test, `p_degrade >= alpha` on every slice.
 
+Gate 5 reports **both tails** of the test (`p_degrade` and `p_improve`, so an
+improvement is a significance claim rather than a higher mean) and the
+**power** of each slice — the minimum detectable effect, plus whether the slice
+could have caught a degradation you declared meaningful. A non-significant
+result from an underpowered slice is flagged `inconclusive` instead of being
+read as equivalence, which is what stops the gate from rubber-stamping variants
+it never had the ability to reject.
+
 ## Design
 
 The five gates are `Gate` objects run by a single short-circuiting

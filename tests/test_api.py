@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import torch.nn as nn
 
 from conftest import DIM, make_factory, make_scorer
 
@@ -47,6 +48,71 @@ def test_summary_dataframe_shape_and_columns():
     # 2 variants x 3 slices = 6 rows
     assert len(df) == 6
     assert {"variant", "slice", "p_degrade", "is_non_inferior", "decision"} <= set(df.columns)
+
+
+def _paired_run(baseline_scores, variant_scores, **kwargs):
+    """Drive the ladder with scripted per-fold scores for one slice."""
+    scores = {"baseline": baseline_scores, "v": variant_scores}
+
+    def factory(overrides):
+        model = nn.Linear(2, 2)
+        model.tag = overrides.get("tag", "baseline")
+        return model
+
+    def scorer(model, slice_name, fold):
+        return scores[model.tag][fold]
+
+    return run_ablation(
+        scorer=scorer,
+        model_factory=factory,
+        variants={"v": {"tag": "v"}},
+        slices=["s"],
+        cv_folds=len(baseline_scores),
+        sanity_mutation=False,
+        seed=0,
+        **kwargs,
+    )
+
+
+def test_underpowered_null_result_is_flagged_inconclusive():
+    # Large per-fold differences that cancel out: no significant effect, and the
+    # noise swamps a 0.03 margin. (Power depends on the paired *differences*,
+    # not on how spread out the raw scores are.)
+    base = [0.50, 0.80, 0.35, 0.75, 0.40, 0.70, 0.45, 0.65, 0.55, 0.60]
+    var = [0.60, 0.71, 0.43, 0.64, 0.47, 0.64, 0.57, 0.57, 0.60, 0.52]
+    row = _paired_run(base, var, practical_margin=0.03).summary.iloc[0]
+    assert bool(row["is_non_inferior"]) and not bool(row["is_improved"])
+    assert bool(row["adequately_powered"]) is False
+    assert bool(row["inconclusive"]) is True
+    assert row["mde"] > 0.03  # cannot resolve the declared margin
+
+
+def test_well_powered_null_result_is_not_flagged():
+    # Tight, near-identical scores: not significant, but able to see 0.03.
+    base = [0.700, 0.702, 0.699, 0.701, 0.703, 0.698, 0.700, 0.702, 0.699, 0.701]
+    var = [0.701, 0.701, 0.700, 0.700, 0.702, 0.699, 0.701, 0.701, 0.700, 0.700]
+    row = _paired_run(base, var, practical_margin=0.03).summary.iloc[0]
+    assert bool(row["is_non_inferior"]) and not bool(row["is_improved"])
+    assert bool(row["adequately_powered"]) is True
+    assert bool(row["inconclusive"]) is False
+    assert row["mde"] < 0.03
+
+
+def test_power_columns_absent_margin_still_report_mde():
+    base = [0.50, 0.80, 0.35, 0.75, 0.40, 0.70, 0.45, 0.65, 0.55, 0.60]
+    var = [0.60, 0.71, 0.43, 0.64, 0.47, 0.64, 0.57, 0.57, 0.60, 0.52]
+    row = _paired_run(base, var).summary.iloc[0]  # no practical_margin
+    assert row["mde"] > 0
+    assert row["power_at_margin"] is None
+
+
+def test_gate_summary_counts_underpowered_cells():
+    base = [0.50, 0.80, 0.35, 0.75, 0.40, 0.70, 0.45, 0.65, 0.55, 0.60]
+    var = [0.60, 0.71, 0.43, 0.64, 0.47, 0.64, 0.57, 0.57, 0.60, 0.52]
+    report = _paired_run(base, var, practical_margin=0.03).report
+    gate = report.get("non_inferiority")
+    assert gate.data["n_inconclusive"] == 1
+    assert "underpowered" in gate.summary
 
 
 def test_disabling_sanity_mutation_skips_fire_drill():

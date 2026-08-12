@@ -179,8 +179,12 @@ def main() -> None:
         print(f"ladder halted at '{result.report.halted_at}'; no decisions produced")
     else:
         print("does each component earn its place? (mean F1 across folds)")
+        # Headers name the effect size each power number is evaluated AT — the
+        # two are inverse readings of one power curve, and an unqualified
+        # "power" invites reading it as power at the observed difference.
         header = (f"  {'ablation':20s} {'slice':15s} {'full_F1':>7s} {'abl_F1':>7s}"
-                  f" {'p_deg':>6s} {'p_impr':>6s} {'MDE':>6s} {'power':>6s}  verdict")
+                  f" {'p_deg':>6s} {'p_impr':>6s} {'MDE@' + format(TARGET_POWER, '.0%'):>8s}"
+                  f" {'pwr@' + format(PRACTICAL_MARGIN, '.3f'):>9s}  verdict")
         print(header)
         print("  " + "-" * (len(header) - 2))
         for _, row in df.iterrows():
@@ -188,7 +192,7 @@ def main() -> None:
                 f"  {row['variant']:20s} {row['slice']:15s} "
                 f"{row['baseline_mean']:7.3f} {row['variant_mean']:7.3f} "
                 f"{row['p_degrade']:6.3f} {row['p_improve']:6.3f} "
-                f"{row['mde']:6.3f} {row['power_at_margin']:6.2f}  {_verdict(row)}"
+                f"{row['mde']:8.3f} {row['power_at_margin']:9.2f}  {_verdict(row)}"
             )
         print(
             f"\n  verdict key (alpha = {P_ALPHA}), both tails of the paired permutation"
@@ -201,10 +205,18 @@ def main() -> None:
             " tell — do not\n"
             "                  read this as equivalence; add folds or shrink the slice's"
             " noise\n"
-            f"\n  MDE   = smallest F1 drop this slice could detect at {TARGET_POWER:.0%}"
-            " power (lower is better)\n"
-            f"  power = probability of catching a {PRACTICAL_MARGIN:.3f} F1 drop, the"
-            " margin declared as meaningful"
+            f"\n  Both power columns read ONE curve (power rises with effect size),"
+            " from opposite ends:\n"
+            f"    MDE@{TARGET_POWER:.0%}   fix power at {TARGET_POWER:.0%}, solve for the"
+            " effect -> smallest F1 drop this slice can detect\n"
+            f"    pwr@{PRACTICAL_MARGIN:.3f}  fix the effect at {PRACTICAL_MARGIN:.3f}"
+            " (the drop declared meaningful), solve for power\n"
+            f"  So pwr@{PRACTICAL_MARGIN:.3f} exceeds {TARGET_POWER:.0%} exactly when"
+            f" MDE@{TARGET_POWER:.0%} < {PRACTICAL_MARGIN:.3f} — they are consistent by"
+            " construction.\n"
+            "  Neither is evaluated at the OBSERVED difference: power at the observed"
+            " effect is post-hoc\n"
+            "  power, a monotone restatement of the p-value that adds no information."
         )
         print("\ncomponent verdicts — REJECTED means the ablation degraded a slice,"
               "\ni.e. the component is load-bearing and must be kept:")

@@ -96,16 +96,72 @@ A variant here is an *ablation*, so the verdicts inverts in a useful way:
   justified by this benchmark.
 
 Per row, **both tails** of the same paired permutation test are reported, so
-every label is a significance claim rather than a mean comparison:
+every label is a significance claim rather than a mean comparison — and the
+*null* result is qualified by power:
 
 | Label | Condition | Meaning |
 |---|---|---|
 | `DEGRADED` | `p_degrade < alpha` | removing the component significantly hurt |
 | `IMPROVED` | `p_improve < alpha` | removing it significantly helped |
-| `same` | neither | no significant difference in either direction |
+| `same` | neither, and adequately powered | genuinely no difference — *evidence of absence* |
+| `INCONCLUSIVE` | neither, but underpowered | the test could not have seen the margin — *absence of evidence* |
 
 A higher mean F1 is **not** enough to earn `IMPROVED` — a slice can drift up by
 0.003 on pure noise, and that reads `same`.
+
+## Is each test adequately powered?
+
+A non-inferiority gate that RETAINS a variant because it *couldn't detect
+anything* is the "insensitive test battery → false confidence" failure the spec
+names as Problem #2. Two power columns make that visible:
+
+Power is a *curve* over effect size. The two columns read that one curve from
+opposite ends, which is why their headers name the value each is evaluated at:
+
+- **`MDE@80%`** — fix power at 80%, solve for the effect: the smallest F1 drop
+  the slice can detect. Lower is better; a large MDE means it is too noisy to trust.
+- **`pwr@0.030`** — fix the effect at the declared meaningful drop
+  (`PRACTICAL_MARGIN`), solve for power. Below `TARGET_POWER` (0.8), a
+  non-significant result is reported `INCONCLUSIVE` rather than `same`.
+
+They cannot disagree: `pwr@0.030 >= 0.8` exactly when `MDE@80% <= 0.030`.
+
+**Neither is evaluated at the observed difference.** A row showing a 0.006 drop
+with `MDE@80% = 0.013` and `pwr@0.030 = 1.00` is consistent, not contradictory —
+0.030 > 0.013, so its power necessarily exceeds 0.8. Power *at* the observed
+effect (0.28 here) is post-hoc power: a monotone restatement of the p-value that
+always calls non-significant results underpowered, so obelus never reports it.
+
+The distinction is not academic. Two rows can carry near-identical verdicts and
+mean opposite things:
+
+```
+no_descriptor_branch lipophilic  0.368 0.356  p_deg 0.324  MDE 0.070  power 0.28  INCONCLUSIVE
+no_graph_encoder     in_distrib. 0.785 0.779  p_deg 0.141  MDE 0.013  power 1.00  same
+```
+
+Both are non-significant. The first slice could not have detected a 3-point F1
+drop if one existed; the second would have caught it essentially always. Only
+the second is evidence of equivalence.
+
+Power here is closed-form (noncentral *t*), so it costs ~4 ms for all 25 cells
+rather than the thousands of resamples a Monte-Carlo estimate would need.
+Post-hoc "observed power" is deliberately not reported — it is just a
+restatement of the p-value. See [`obelus/core/power.py`](../obelus/core/power.py).
+
+### The structural check
+
+Before any data is involved, the run prints what the test is even *capable* of:
+
+```
+test capability: 10 folds -> smallest attainable p = 0.0010 vs alpha = 0.05  [OK]
+  (5 folds would give 0.0312; 4 folds 0.0625 > 0.05, i.e. structurally unable to reject)
+```
+
+A paired sign-flip permutation test over `n` folds has only `2**n` arrangements,
+so p can never fall below `2**-n`. At `alpha=0.05` a **4-fold** setup can never
+reject — every slice would pass vacuously — and the spec's default of 5 folds
+clears the bar only by requiring the single most extreme arrangement.
 
 Exact numbers shift with platform math libraries, but the shape is stable and
 genuinely interesting. The descriptor branch and the learned fusion are broadly

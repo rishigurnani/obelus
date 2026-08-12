@@ -74,6 +74,24 @@ def test_mde_is_the_effect_reaching_target_power():
     assert at_mde.power_at_margin == pytest.approx(0.8, abs=0.02)
 
 
+@pytest.mark.parametrize("margin", [0.005, 0.02, 0.05, 0.2])
+def test_mde_and_power_at_margin_are_consistent(margin):
+    """The two columns are inverse readings of one curve, so they cannot disagree.
+
+    power(margin) >= target_power  <==>  mde <= margin
+    """
+    b = [0.50, 0.62, 0.44, 0.58, 0.46, 0.55, 0.49, 0.60, 0.52, 0.57]
+    v = [0.51, 0.60, 0.45, 0.57, 0.47, 0.54, 0.50, 0.58, 0.53, 0.55]
+    report = analyze_power(b, v, target_power=0.8, margin=margin)
+    assert (report.power_at_margin >= report.target_power) == (report.mde <= margin)
+
+
+def test_power_at_zero_effect_is_the_type_one_error_rate():
+    b = [0.50, 0.62, 0.44, 0.58, 0.46]
+    v = [0.51, 0.60, 0.45, 0.57, 0.47]
+    assert analyze_power(b, v, alpha=0.05, margin=0.0).power_at_margin == pytest.approx(0.05)
+
+
 def test_metric_direction_is_respected():
     # Identical spread either way: the noise scale should not depend on direction.
     b = [0.30, 0.35, 0.25, 0.32, 0.28]
