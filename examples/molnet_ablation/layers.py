@@ -143,7 +143,11 @@ class GatedFusion(nn.Module):
 
     def __init__(self, hidden: int = 64):
         super().__init__()
-        self.gate = nn.Linear(hidden, 1)
+        # bias=False on purpose: the softmax below is over the branch dimension
+        # and is shift-invariant, so a scalar bias would add the same constant to
+        # every branch and could never change the output. Gate 2 flags it as a
+        # dead parameter — correctly.
+        self.gate = nn.Linear(hidden, 1, bias=False)
 
     @check_shapes("batch branches hidden -> batch hidden")
     @check_invariants(no_nans=True, no_infs=True, max_norm_ratio=10.0)

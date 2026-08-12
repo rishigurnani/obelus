@@ -72,3 +72,45 @@ def test_dead_parameter_fails_gradient_check():
 
     with pytest.raises(PreflightError):
         run_preflight(DeadParam(), (4, 8), max_examples=5)
+
+
+class _ShiftInvariantGate(nn.Module):
+    """Mirrors a real bug: softmax over dim=1 is shift-invariant, so the gate's
+    scalar bias can never affect the output. Its true gradient is exactly 0, but
+    float32 rounding usually yields ~1e-10 instead, and Adam's normalised step
+    turns that into a full-size update — so a 'did the parameter move?' check
+    reports this dead parameter as alive most of the time."""
+
+    def __init__(self, dim=8):
+        super().__init__()
+        self.gate = nn.Linear(dim, 1)
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self, x):  # x: (batch, branches, dim)
+        weights = torch.softmax(self.gate(x), dim=1)
+        return self.proj((weights * x).sum(1))
+
+
+def test_structurally_dead_parameter_is_caught_deterministically():
+    """The old did-it-move check passed ~5 runs in 6; this must fail every time."""
+    for seed in range(6):
+        torch.manual_seed(seed)
+        with pytest.raises(PreflightError, match="gate.bias"):
+            run_preflight(_ShiftInvariantGate(), (4, 3, 8), max_examples=1)
+
+
+def test_partially_used_parameter_is_not_flagged():
+    """An embedding whose unused rows get zero gradient is alive, not dead."""
+    torch.manual_seed(0)
+    inputs = (torch.randn(4, 8), torch.randint(0, 10, (4, 5)))
+
+    class Partial(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(8, 4)
+            self.embed = nn.Embedding(10, 4)  # most rows never indexed
+
+        def forward(self, x, tokens):
+            return self.lin(x) + self.embed(tokens).mean(1)
+
+    run_preflight(Partial(), example_inputs=inputs, max_examples=1)

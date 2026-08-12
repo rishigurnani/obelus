@@ -54,6 +54,47 @@ class _VaryOne(nn.Module):
         return self.inner(*args)
 
 
+def _dead_parameters(
+    model: nn.Module,
+    inputs: Sequence,
+    abs_tol: float = 1e-8,
+    rel_tol: float = 1e-6,
+) -> list[str]:
+    """Names of trainable parameters that receive no usable gradient.
+
+    Checks the **gradient** rather than whether an optimizer moved the parameter.
+    That distinction matters: Adam normalises its step to
+    ``lr * g / (|g| + eps)``, so a gradient of 1e-10 — pure float32 rounding
+    noise around a structurally-zero gradient — still produces a full-size
+    update. A "did the parameter change?" test therefore reports a dead
+    parameter as alive whenever the noise happens not to round to exactly zero,
+    which is most of the time. Reading the gradient is invariant to the
+    optimizer and to that noise.
+
+    Runs in eval mode so dropout cannot zero a path by chance and make a live
+    parameter look dead.
+    """
+    was_training = model.training
+    model.eval()
+    model.zero_grad(set_to_none=True)
+    try:
+        model(*inputs).float().pow(2).mean().backward()
+        grads = {
+            name: (0.0 if p.grad is None else float(p.grad.abs().max()))
+            for name, p in model.named_parameters()
+            if p.requires_grad
+        }
+        if not grads:
+            return []
+        # Scale-relative floor: a gradient far below the model's largest is
+        # noise, not signal, whatever the absolute units happen to be.
+        threshold = max(abs_tol, rel_tol * max(grads.values()))
+        return [name for name, g in grads.items() if g <= threshold]
+    finally:
+        model.zero_grad(set_to_none=True)
+        model.train(was_training)
+
+
 def _varied_index(inputs: Sequence) -> int:
     """Index of the first floating-point tensor — the one worth perturbing."""
     for i, value in enumerate(inputs):
@@ -86,7 +127,17 @@ def run_preflight(
     probe = _VaryOne(model, example_inputs, index)
     varied = example_inputs[index]
 
-    # 1. Gradient update verification: every trainable parameter must change.
+    # 1a. Structural gradient check, run before anything mutates the weights.
+    # Deterministic, and it catches the dead parameters torchtest's
+    # did-it-move test misses (see _dead_parameters).
+    dead = _dead_parameters(model, example_inputs)
+    if dead:
+        raise PreflightError(
+            "gradient integrity check failed: no usable gradient reaches "
+            + ", ".join(dead)
+        )
+
+    # 1b. Gradient update verification: every trainable parameter must change.
     optimizer = torch.optim.Adam(probe.parameters(), lr=1e-3)
     try:
         assert_vars_change(
