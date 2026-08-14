@@ -1,55 +1,47 @@
-# Example: config-driven architecture ablation on BACE-1
+# Example: architecture verification on BACE-1, in both directions
 
-A runnable, offline demonstration of obelus on a real drug-discovery task —
-classifying molecules as **active / inactive against BACE-1** (human β-secretase 1,
-an Alzheimer's target). It answers the question obelus exists for:
+A runnable, offline demo on a real drug-discovery task — classifying molecules as
+**active / inactive against BACE-1** (human β-secretase 1, an Alzheimer's
+target). It answers the two questions obelus exists for:
 
-> Does every component of my architecture **earn its place** — or is one of them
-> dead weight, and is another quietly load-bearing on a failure mode the
-> aggregate metric never shows me?
+> Is this component worth **adding**? Can this component be **dropped**?
 
-Runs on a CPU MacBook Air in **~32 s**.
+Trains 6 small models end to end in well under a minute on a CPU laptop.
 
 ```bash
 uv pip install --python .venv -e ".[examples]"   # rdkit + scikit-learn
 .venv/bin/python -m examples.molnet_ablation.run
 ```
 
-## The point: the ablation matrix comes from the Hydra config
+## One config, both directions
 
-You write **one YAML** ([`configs/architecture.yaml`](configs/architecture.yaml)),
-and `obelus.core.discovery.generate_knockouts` derives the entire experiment.
-No variant list is written by hand:
+[`configs/architecture_options.yaml`](configs/architecture_options.yaml) declares
+each decision node's alternatives **ordered simple → complex**, and names the
+incumbent:
 
 ```yaml
-model:
-  _target_: examples.molnet_ablation.layers.HybridMolecularClassifier
-  descriptor_branch:  { _target_: ...DescriptorBranch, ... }
-  graph_encoder:      { _target_: ...GraphEncoder, residual: { active: true } }
-  sequence_encoder:   { _target_: ...SequenceEncoder, ... }
-  fusion:             { _target_: ...GatedFusion, ... }
+graph_encoder:
+  _options_:
+    - {_target_: torch.nn.Identity}                              # rank 0
+    - {_target_: examples.molnet_ablation.layers.GraphEncoder}   # rank 1
+  _current_: 1        # present today -> an ablation candidate
 ```
 
-becomes five knockouts, discovered automatically:
+The ordering *is* your declaration of what "simpler" means, so obelus never
+guesses. From that one file it derives both experiments — nothing is hand-written:
 
-| Variant | Override generated | Architectural question |
+| direction | options it uses | question |
 |---|---|---|
-| `no_descriptor_branch` | `_target_` → `torch.nn.Identity` | do hand-crafted 2D features still matter? |
-| `no_graph_encoder` | `_target_` → `torch.nn.Identity` | does the GNN earn its cost? |
-| `no_sequence_encoder` | `_target_` → `torch.nn.Identity` | does the Transformer add anything? |
-| `no_fusion` | `_target_` → `torch.nn.Identity` | is learned gating better than a plain mean? |
-| `no_residual` | `active` → `false` | do the GNN skip connections matter? |
+| `AutoInsert` | ranked **above** `_current_` | is it worth adding? |
+| `AutoAblate` | ranked **below** `_current_` | can it be dropped? |
 
-`torch.nn.LayerNorm`-style **library** layers are deliberately left alone —
-discovery only ablates modules matching your project prefix. **Add a module to
-the YAML and it gets ablated on the next run**; delete one and its variant
-disappears. That is the leverage Hydra provides here.
+The model sits deliberately mid-stack — descriptor branch and GNN on, SMILES
+Transformer and learned fusion off — so there are moves in both directions. Hydra
+instantiates for real, so a move is a genuine config-level architecture change,
+not a special code path. This is obelus's only variant form: a knockout is just
+the rank-0 option, and a toggle is a two-option node over the flag.
 
-Hydra does the instantiation for real: `HydraModelFactory` applies each override
-set and calls `hydra.utils.instantiate`, so a knockout is a genuine config-level
-architecture change, not a special code path.
-
-## The architecture (mixed hand-crafted and learned features)
+## The architecture
 
 ```
 descriptors ──► DescriptorBranch   (2D computed RDKit features)  ┐
@@ -57,121 +49,75 @@ atom graph  ──► GraphEncoder       (learned — graph convolution) ├─�
 SMILES ids  ──► SequenceEncoder    (learned — Transformer)       ┘
 ```
 
-A branch knocked out to `nn.Identity` is treated as *absent*, so fusion simply
-receives one fewer embedding ([`layers.py`](molnet_ablation/layers.py)).
-`GatedFusion.forward` carries obelus's `@check_shapes` / `@check_invariants`
-contracts, so Gate 1 does real work on this model.
+A branch at rank 0 (`nn.Identity`) counts as *absent*, so fusion receives one
+fewer embedding ([`layers.py`](molnet_ablation/layers.py)). `GatedFusion.forward`
+carries obelus's `@check_shapes` / `@check_invariants` contracts, so Gate 1 does
+real work. The model takes six tensors, so gates 1–2 get a real `example_input`
+batch rather than an `input_shape` — and run on **every** variant.
 
-Because the model takes six tensors, gates 1–2 are fed a real `example_input`
-batch rather than a single `input_shape`.
+## Failure modes → slices
 
-## Failure modes → slices (one split per failure mode)
+Each variant trains **once** on a shared pool, then is probed on cohorts held out
+from it ([`data.py`](molnet_ablation/data.py)): `in_distribution` (control),
+`novel_scaffold`, `large`, `flexible`, `lipophilic`.
 
-Each variant trains **once** on a shared pool, then is probed on disjoint cohorts
-held out from it, each stressing a documented way a molecular classifier breaks
-([`data.py`](molnet_ablation/data.py)):
+Three design choices there are worth knowing, because each fixes a specific way
+this benchmark can lie to you:
 
-| Slice | Failure mode it exposes |
-|---|---|
-| `in_distribution` | control — random held-out molecules |
-| `novel_scaffold` | structural novelty (Murcko scaffolds unseen in training) |
-| `large` | molecular-size extrapolation (top-decile heavy atoms) |
-| `lipophilic` | physicochemical covariate shift (top-decile logP) |
-| `flexible` | conformational flexibility (top-decile rotatable bonds) |
+- **Cohorts overlap.** Big molecules are also flexible. Forcing each molecule
+  into one cohort would silently redefine `flexible` as "flexible *but small*",
+  and the slice would stop measuring the failure mode it is named after.
+- **Overlap ⇒ dependent tests**, so the "any slice rejects" family takes a Holm
+  correction. Passing slice *membership* (not just names) is what lets obelus
+  detect this; see `obelus.core.stats.select_correction` for why Holm rather than
+  a permutation-based correction.
+- **Cohorts keep half their tail in training** (`tail_support`). Held out
+  entirely, the model never sees a single large molecule, and where label
+  prevalence flips across the cut it learns the relationship backwards — scoring
+  *negative* MCC on its own cohort.
 
-## How folds work here
+**MCC, not F1.** F1's trivial baseline moves with prevalence: predicting "active"
+everywhere scores 0.79 on a 66%-positive cohort. A corrupted model collapses
+toward a constant and so *gains* on skewed slices, which blinds the fire drill.
+Any constant predictor scores 0 MCC on every slice.
 
-Models train once, so the CV `folds` are **seeded bootstrap resamples** of each
-slice — they give the paired permutation test its variance, and baseline and
-variant always see the same resample per fold. The example uses 10 (2¹⁰
-arrangements → fine p-value resolution). **F1 is the guiding metric.**
+Folds are seeded bootstrap resamples of each slice (models train once) giving the
+paired permutation test its variance; baseline and variant always see the same
+resample per fold.
 
 ## Reading the output
 
-A variant here is an *ablation*, so the verdicts inverts in a useful way:
+Each `(move, slice)` cell is labelled against that direction's effect size δ:
 
-You must declare `EFFECT_SIZE` — the move that actually counts (0.10 F1 here).
-obelus requires it; there is no default, because "is this difference real?" is
-unanswerable until you say what size of difference matters.
-
-A variant must **earn its place**: RETAINED requires a `FORWARD` leap on at
-least one slice *and* no `BACKWARD` slice anywhere. Being merely harmless is not
-enough — `ON_PAR` everywhere is REJECTED.
-
-- **RETAINED** — removing the component measurably *helps* somewhere and hurts
-  nowhere ⇒ the removal earns its place.
-- **REJECTED** — either some slice went BACKWARD (the component is
-  **load-bearing, keep it**) or nothing improved (no reason to change).
-
-Per row, **both tails** of the same paired permutation test are reported, so
-every label is a significance claim rather than a mean comparison — and the
-*null* result is qualified by power:
-
-| Label | Condition | Meaning |
-|---|---|---|
-| `BACKWARD` | significantly worse by ≥ δ | a real regression — rejects the ablation |
-| `FORWARD` | significantly better by ≥ δ | a real gain |
-| `ON_PAR` | neither leap established | the move is smaller than δ, or not significant |
-| `*` suffix | `ON_PAR` but underpowered | the test could not have seen δ — *absence of evidence* |
-
-Both conditions must hold: a difference counts only when it is **large enough to
-matter** *and* **statistically significant**. A 0.003 drift never labels, and
-neither does a statistically clean 0.03 drop when δ = 0.10.
-
-Testing against δ is not new machinery: it is the same paired permutation test
-with the baseline shifted by ±δ, so `classify_effect` just calls
-`evaluate_non_inferiority` twice.
-
-## Is each test adequately powered?
-
-A non-inferiority gate that RETAINS a variant because it *couldn't detect
-anything* is the "insensitive test battery → false confidence" failure the spec
-names as Problem #2. Two power columns make that visible:
-
-Power is a *curve* over effect size. The two columns read that one curve from
-opposite ends, which is why their headers name the value each is evaluated at:
-
-- **`MDE@80%`** — fix power at 80%, solve for the effect: the smallest F1 drop
-  the slice can detect. Lower is better; a large MDE means it is too noisy to trust.
-- **`pwr@0.100`** — fix the effect at the declared `EFFECT_SIZE`, solve for
-  power. Below `TARGET_POWER` (0.8), an `ON_PAR` row is starred (`*`) because it
-  cannot be read as equivalence.
-
-The same δ drives both the labels and the power, so they cannot drift apart:
-`pwr@0.100 >= 0.8` exactly when `MDE@80% <= 0.100`.
-
-**Neither is evaluated at the observed difference.** A row showing a 0.006 drop
-with `MDE@80% = 0.013` and `pwr@0.100 = 1.00` is consistent, not contradictory —
-0.100 > 0.013, so its power necessarily exceeds 0.8. Power *at* the observed
-effect is post-hoc power: a monotone restatement of the p-value that always calls
-non-significant results underpowered, so obelus never reports it.
-
-The distinction is not academic. Two `ON_PAR` rows can mean opposite things — one
-is evidence the component is dispensable, the other only evidence that the slice
-is too noisy to say.
-
-Power here is closed-form (noncentral *t*), so it costs ~4 ms for all 25 cells
-rather than the thousands of resamples a Monte-Carlo estimate would need.
-Post-hoc "observed power" is deliberately not reported — it is just a
-restatement of the p-value. See [`obelus/core/power.py`](../obelus/core/power.py).
-
-### The structural check
-
-Before any data is involved, the run prints what the test is even *capable* of:
+| Label | Meaning |
+|---|---|
+| `BACKWARD` | significantly worse by ≥ δ — rejects the move in either direction |
+| `FORWARD` | significantly better by ≥ δ — required by `AutoInsert` |
+| `ON_PAR` | neither leap; for `AutoAblate`, equivalence was **proven** (TOST) |
+| `INCONCLUSIVE` | equivalence unproven — blocks an ablation |
 
 ```
-test capability: 10 folds -> smallest attainable p = 0.0010 vs alpha = 0.05  [OK]
-  (5 folds would give 0.0312; 4 folds 0.0625 > 0.05, i.e. structurally unable to reject)
+AutoInsert  RETAIN iff  >=1 FORWARD  and  no BACKWARD     (must earn its cost)
+AutoAblate  RETAIN iff  no BACKWARD  and  no INCONCLUSIVE (harm ruled out, provably)
 ```
 
-A paired sign-flip permutation test over `n` folds has only `2**n` arrangements,
-so p can never fall below `2**-n`. At `alpha=0.05` a **4-fold** setup can never
-reject — every slice would pass vacuously — and the spec's default of 5 folds
-clears the bar only by requiring the single most extreme arrangement.
+δ differs by direction on purpose: `TOLERANCE` is what you will give up to
+simplify, `WORTHWHILE_GAIN` what an addition must buy. **The same row of evidence
+can therefore be RETAINED in one direction and REJECTED in the other** — an
+addition that buys nothing is not worth its cost, while a removal that costs
+nothing is free simplification. That asymmetry is the whole point, and it lives
+entirely in [`obelus/core/policy.py`](../obelus/core/policy.py).
 
-Exact numbers shift with platform math libraries, but the shape is stable and
-genuinely interesting. The descriptor branch and the learned fusion are broadly
-load-bearing. The graph encoder is the striking one: dropping it *significantly
-helps* on `large` and `lipophilic` while *significantly hurting* on
-`novel_scaffold` and `flexible` — a real trade-off that a single aggregate
-validation score would average into nothing.
+`MDE@80%` and `pwr@δ` are inverse readings of one power curve: fix power and
+solve for effect, or fix effect and solve for power. They cannot disagree —
+`pwr@δ ≥ 0.8` exactly when `MDE@80% ≤ δ`. Neither is evaluated at the *observed*
+difference, which would be post-hoc power: a monotone restatement of the p-value.
+This matters most for `AutoAblate`, which accepts *on* `ON_PAR` — so a slice too
+noisy to prove equivalence is reported `INCONCLUSIVE` and blocks the change
+rather than waving it through. See [`power.py`](../obelus/core/power.py).
+
+If Gate 3 fails, the run halts before any sweep and names the cause per slice —
+either the model has no signal there to destroy, or the cohort is too noisy to
+resolve the damage. Those need opposite fixes, which is why the message
+distinguishes them. Refusing to sweep behind a benchmark that cannot detect
+regressions is the tool working, not a bug.

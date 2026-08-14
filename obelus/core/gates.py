@@ -17,14 +17,24 @@ from obelus.core.ladder import GateResult, LadderContext
 from obelus.core.mutator import ModelMutator
 from obelus.core.power import analyze_power
 from obelus.core.runner import run_preflight
-from obelus.core.stats import BACKWARD, FORWARD, ON_PAR, classify_effect, evaluate_non_inferiority
+from obelus.core.stats import (
+    BACKWARD,
+    FORWARD,
+    INCONCLUSIVE,
+    ON_PAR,
+    adjust_pvalues,
+    classify_effect,
+    evaluate_non_inferiority,
+    label_effect,
+    select_correction,
+)
 
 __all__ = [
     "ContractGate",
     "PreflightGate",
     "FireDrillGate",
     "CrossValidationSweepGate",
-    "NonInferiorityGate",
+    "DecisionGate",
     "default_gates",
 ]
 
@@ -40,13 +50,15 @@ class ContractGate:
         inputs = ctx.build_inputs()
         if inputs is None:
             return GateResult(self.name, True, _SKIP_NO_SHAPE)
-        try:
-            ctx.baseline_model.eval()
-            with torch.no_grad():
-                ctx.baseline_model(*inputs)
-        except Exception as exc:
-            return GateResult(self.name, False, f"contract violation: {exc}")
-        return GateResult(self.name, True, "contracts satisfied on baseline forward pass")
+        models = ctx.models()
+        for name, model in models.items():
+            try:
+                model.eval()
+                with torch.no_grad():
+                    model(*inputs)
+            except Exception as exc:
+                return GateResult(self.name, False, f"contract violation in '{name}': {exc}")
+        return GateResult(self.name, True, f"contracts satisfied on {len(models)} model(s)")
 
 
 class PreflightGate:
@@ -58,14 +70,17 @@ class PreflightGate:
         inputs = ctx.build_inputs()
         if inputs is None:
             return GateResult(self.name, True, _SKIP_NO_SHAPE)
-        # run_preflight takes an optimizer step, so test a throwaway clone rather
-        # than perturb the (possibly already-trained) baseline shared downstream.
-        probe = copy.deepcopy(ctx.baseline_model)
-        try:
-            run_preflight(probe, example_inputs=inputs)
-        except Exception as exc:
-            return GateResult(self.name, False, f"pre-flight failed: {exc}")
-        return GateResult(self.name, True, "gradients flow; no NaN/Inf from finite inputs")
+        models = ctx.models()
+        for name, model in models.items():
+            # run_preflight takes an optimizer step, so test a throwaway clone
+            # rather than perturb a model reused downstream.
+            try:
+                run_preflight(copy.deepcopy(model), example_inputs=inputs)
+            except Exception as exc:
+                return GateResult(self.name, False, f"pre-flight failed for '{name}': {exc}")
+        return GateResult(
+            self.name, True,
+            f"gradients flow, no NaN/Inf from finite inputs, across {len(models)} model(s)")
 
 
 class FireDrillGate:
@@ -93,14 +108,39 @@ class FireDrillGate:
             seed=ctx.seed,
         )
         p_values = {v.slice_name: v.test.p_degrade for v in verdicts}
+        # What the sabotage actually cost, per slice — the key diagnostic.
+        cost = {v.slice_name: v.test.baseline_mean - v.test.variant_mean for v in verdicts}
+        data = {"p_degrade": p_values, "sabotage_cost": cost}
         # Sensitive == degradation detected == NOT judged non-inferior.
-        insensitive = [v.slice_name for v in verdicts if v.test.is_non_inferior]
-        passed = not insensitive
-        if passed:
-            summary = f"all {len(verdicts)} slice(s) detected the corruption"
-        else:
-            summary = f"insensitive slice(s): {', '.join(insensitive)}"
-        return GateResult(self.name, passed, summary, {"p_degrade": p_values})
+        blind = [v for v in verdicts if v.test.is_non_inferior]
+        if not blind:
+            return GateResult(
+                self.name, True, f"all {len(verdicts)} slice(s) detected the corruption", data
+            )
+        # Name the cause, not just the numbers: the two failure modes need
+        # opposite fixes, and the caller cannot tell them apart from a p-value.
+        lines = []
+        for v in blind:
+            mde = analyze_power(v.baseline, v.variant, alpha=ctx.alpha,
+                                greater_is_better=ctx.greater_is_better).mde
+            drop = cost[v.slice_name]
+            if drop < mde:  # the damage is real but smaller than the slice can see
+                why = (f"breaking the model cost {drop:.3f}, but this slice cannot "
+                       f"resolve anything below {mde:.3f} — too noisy to judge; "
+                       f"add folds or enlarge the cohort")
+            else:  # nothing was destroyed, because there was nothing there
+                why = (f"breaking the model cost only {drop:.3f} — there is no signal "
+                       f"here to destroy, so this slice cannot show it would catch "
+                       f"a regression; fix the model on this slice or drop it")
+            lines.append(f"\n      {v.slice_name}: {why}")
+        return GateResult(
+            self.name,
+            False,
+            f"{len(blind)} of {len(verdicts)} slice(s) cannot detect deliberate "
+            f"sabotage, so they cannot be trusted to catch a real regression:"
+            + "".join(lines),
+            data,
+        )
 
 
 class CrossValidationSweepGate:
@@ -118,7 +158,7 @@ class CrossValidationSweepGate:
                     ctx.tracker.log_params(
                         {f"override.{k}": v for k, v in overrides.items()}
                     )
-                    variant_model = ctx.model_factory(overrides)
+                    variant_model = ctx.models()[variant_name]
                     pairs = evaluate_pair(
                         ctx.baseline_model,
                         variant_model,
@@ -141,8 +181,8 @@ class CrossValidationSweepGate:
         )
 
 
-class NonInferiorityGate:
-    """Gate 5 — decide RETAINED/REJECTED per variant against the declared effect size.
+class DecisionGate:
+    """Gate 5 — decide RETAINED/REJECTED per variant, per the active policy.
 
     Each slice is classified FORWARD / ON_PAR / BACKWARD relative to
     ``ctx.effect_size``. A variant is RETAINED iff it is **FORWARD on at least
@@ -152,7 +192,7 @@ class NonInferiorityGate:
     both large enough to matter and statistically significant.
     """
 
-    name = "non_inferiority"
+    name = "decision"
 
     def run(self, ctx: LadderContext, prior: list[GateResult]) -> GateResult:
         sweep = next((r.data.get("sweep") for r in prior if r.name == "cv_sweep"), None)
@@ -161,8 +201,11 @@ class NonInferiorityGate:
 
         rows: list[dict] = []
         decisions: dict[str, str] = {}
+        # One family per variant: each variant is its own accept/reject decision,
+        # so strictness does not drift as the config gains unrelated variants.
+        method = select_correction(ctx.slice_members)
         for variant_name, pairs in sweep.items():
-            no_backward, any_forward = True, False
+            equivalence: dict[str, bool] = {}
             variant_rows: list[dict] = []
             for pair in pairs:
                 effect = classify_effect(
@@ -171,6 +214,7 @@ class NonInferiorityGate:
                     ctx.effect_size,
                     alpha=ctx.alpha,
                     greater_is_better=ctx.greater_is_better,
+                    require_equivalence=ctx.policy.requires_equivalence,
                     seed=ctx.seed,
                 )
                 # The same declared delta drives power, so ON_PAR can be read as
@@ -183,13 +227,11 @@ class NonInferiorityGate:
                     margin=ctx.effect_size,
                     greater_is_better=ctx.greater_is_better,
                 )
-                no_backward &= effect.label != BACKWARD
-                any_forward |= effect.label == FORWARD
+                equivalence[pair.slice_name] = effect.is_equivalent
                 variant_rows.append(
                     {
                         "variant": variant_name,
                         "slice": pair.slice_name,
-                        "label": effect.label,
                         "p_backward": effect.p_backward,
                         "p_forward": effect.p_forward,
                         "baseline_mean": effect.baseline_mean,
@@ -197,21 +239,39 @@ class NonInferiorityGate:
                         "mde": power.mde,
                         "power_at_effect": power.power_at_margin,
                         "adequately_powered": power.adequately_powered,
-                        # ON_PAR the test could never have contradicted is not
-                        # evidence; flag it so it is never read as equivalence.
-                        "inconclusive": effect.label == ON_PAR
-                        and not power.adequately_powered,
+                        "p_not_worse": effect.p_not_worse,
+                        "p_not_better": effect.p_not_better,
                     }
                 )
-            # Earn-your-place rule: a real gain somewhere, a regression nowhere.
-            decision = "RETAINED" if (any_forward and no_backward) else "REJECTED"
+            # "Any slice rejects" is union-intersection, so these two carry the
+            # family-wise penalty; the TOST bounds behind is_equivalent need
+            # *every* slice and so take none. Columns hold the adjusted values,
+            # because those are what the verdict was actually read from.
+            for key in ("p_backward", "p_forward"):
+                adjusted = adjust_pvalues({r["slice"]: r[key] for r in variant_rows}, method)
+                for row in variant_rows:
+                    row[key] = adjusted[row["slice"]]
+            for row in variant_rows:
+                row["label"] = label_effect(
+                    row["p_backward"], row["p_forward"], equivalence[row["slice"]],
+                    alpha=ctx.alpha, require_equivalence=ctx.policy.requires_equivalence,
+                )
+                # ON_PAR the test could never have contradicted is not evidence;
+                # flag it so it is never read as equivalence.
+                row["inconclusive"] = row["label"] == INCONCLUSIVE or (
+                    row["label"] == ON_PAR and not row["adequately_powered"]
+                )
+            labels = [row["label"] for row in variant_rows]
+            # The one place the two directions differ (see obelus.core.policy).
+            decision = ctx.policy.decide(labels)
             decisions[variant_name] = decision
             for row in variant_rows:
                 row["decision"] = decision
             rows.extend(variant_rows)
 
         n_retained = sum(d == "RETAINED" for d in decisions.values())
-        summary = f"{n_retained}/{len(decisions)} variant(s) retained"
+        summary = (f"{n_retained}/{len(decisions)} variant(s) retained"
+                   f"; {len(ctx.slices)} slices, {method} correction")
         n_inconclusive = sum(r["inconclusive"] for r in rows)
         if n_inconclusive:
             summary += f"; {n_inconclusive}/{len(rows)} cell(s) underpowered"
@@ -234,5 +294,5 @@ def default_gates() -> list:
         PreflightGate(),
         FireDrillGate(),
         CrossValidationSweepGate(),
-        NonInferiorityGate(),
+        DecisionGate(),
     ]

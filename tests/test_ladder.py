@@ -26,7 +26,6 @@ class RecordingGate:
 
 def _ctx():
     return LadderContext(
-        baseline_model=nn.Identity(),
         model_factory=lambda o: nn.Identity(),
         variants={"baseline": {}},
         scorer=lambda m, s, k: 0.0,
@@ -70,8 +69,7 @@ def test_preflight_gate_does_not_mutate_baseline():
     model = nn.Linear(8, 8)
     before = model.weight.detach().clone()
     ctx = LadderContext(
-        baseline_model=model,
-        model_factory=lambda o: nn.Linear(8, 8),
+        model_factory=lambda o: model,
         variants={"baseline": {}},
         scorer=lambda m, s, k: 0.0,
         slices=[],
@@ -96,3 +94,27 @@ def test_failure_short_circuits_later_gates():
     assert report.passed is False
     assert report.halted_at == "b"
     assert report.get("c") is None
+
+
+def test_fire_drill_diagnoses_why_a_slice_is_blind():
+    """A failing fire drill must say what the sabotage cost, not just that it failed."""
+    import pytest
+    import torch.nn as nn
+
+    from obelus.core.gates import FireDrillGate
+    from obelus.core.ladder import LadderContext
+
+    ctx = LadderContext(
+        model_factory=lambda o: nn.Linear(4, 4),
+        variants={"baseline": {}},
+        scorer=lambda m, s, k: 0.5 + 0.001 * k,  # ignores the model: nothing to destroy
+        slices=["numb"],
+        folds=10,
+    )
+    result = FireDrillGate().run(ctx, [])
+    assert result.passed is False
+    # Nothing was destroyed because there was no signal: the message must name
+    # that cause, not just report that the slice failed.
+    assert "no signal here to destroy" in result.summary
+    assert "numb" in result.summary
+    assert result.data["sabotage_cost"]["numb"] == pytest.approx(0.0, abs=1e-9)

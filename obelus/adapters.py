@@ -19,7 +19,7 @@ class HydraModelFactory:
 
     Satisfies :class:`obelus.core.seams.ModelFactory`. Override keys are dotted
     paths rooted at the config (e.g. ``"model.attn._target_"``), as produced by
-    :func:`obelus.core.discovery.generate_knockouts`.
+    :func:`obelus.core.options.generate_moves`.
     """
 
     def __init__(self, cfg: DictConfig) -> None:
@@ -30,5 +30,8 @@ class HydraModelFactory:
 
         cfg = OmegaConf.create(OmegaConf.to_container(self._cfg, resolve=False))
         for dotted, value in overrides.items():
-            OmegaConf.update(cfg, dotted, value, force_add=True)
+            # merge=False so a dict override *replaces* the node rather than
+            # merging into it — an option swap must not leave the previous
+            # option's keys (or the _options_/_current_ scaffolding) behind.
+            OmegaConf.update(cfg, dotted, value, merge=False, force_add=True)
         return instantiate(cfg.model)

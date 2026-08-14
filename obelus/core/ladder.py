@@ -11,7 +11,7 @@ evolves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 import torch
 import torch.nn as nn
@@ -41,11 +41,14 @@ class LadderContext:
     variant name to its knockout override set (``"baseline"`` -> ``{}``).
     """
 
-    baseline_model: nn.Module
     model_factory: ModelFactory
     variants: dict[str, dict[str, Any]]
     scorer: Scorer
     slices: list[str]
+    # Slice membership, when the caller knows it. Sharing members across slices
+    # makes the per-slice tests dependent, which selects the correction (see
+    # obelus.core.stats.select_correction); None means "unknown, assume worst".
+    slice_members: Optional[Mapping[str, Sequence[Any]]] = None
     folds: int = 5
     input_shape: Optional[tuple[int, ...]] = None
     example_input: Optional[Callable[[], Any]] = None
@@ -53,9 +56,31 @@ class LadderContext:
     greater_is_better: bool = True
     effect_size: float = 0.05
     target_power: float = 0.8
+    policy: Any = None  # DecisionPolicy; set by the API
     mutator_fraction: float = 0.30
     tracker: Tracker = field(default_factory=NullTracker)
     seed: int = 0
+    _models: Optional[dict] = field(default=None, repr=False)
+
+    def models(self) -> dict:
+        """Build every variant once and cache them.
+
+        Gates 1-2 verify *each* variant, not only the baseline: an insertion
+        variant contains code no baseline has, and even an ablation can
+        destabilise numerics the baseline never saw. Caching here means the CV
+        sweep reuses these instances rather than rebuilding (and, with a
+        training factory, retraining) them.
+        """
+        if self._models is None:
+            self._models = {
+                name: self.model_factory(overrides)
+                for name, overrides in self.variants.items()
+            }
+        return self._models
+
+    @property
+    def baseline_model(self) -> nn.Module:
+        return self.models()["baseline"]
 
     def build_inputs(self) -> Optional[tuple]:
         """Return positional forward() args for gates 1-2, or ``None`` to skip.

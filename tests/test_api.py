@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from conftest import DIM, make_factory, make_scorer
 
-from obelus import AutoAblate, run_ablation
+from obelus import AutoAblate, run_verification
 from obelus.core.ladder import LadderReport
 
 
@@ -24,19 +24,19 @@ def _run(**overrides):
         seed=0,
     )
     kwargs.update(overrides)
-    return run_ablation(**kwargs)
+    return run_verification(**kwargs)
 
 
 def test_full_ladder_passes_and_all_gates_run():
     result = _run()
     assert result.passed is True
     names = [r.name for r in result.report.results]
-    assert names == ["contracts", "preflight", "fire_drill", "cv_sweep", "non_inferiority"]
+    assert names == ["contracts", "preflight", "fire_drill", "cv_sweep", "decision"]
 
 
 def test_decisions_split_variants_correctly():
     result = _run()
-    decisions = result.report.get("non_inferiority").data["decisions"]
+    decisions = result.report.get("decision").data["decisions"]
     assert decisions["weak_variant"] == "REJECTED"
     assert decisions["strong_variant"] == "RETAINED"
     assert set(result.retained) == {"strong_variant"}
@@ -63,7 +63,7 @@ def _paired_run(baseline_scores, variant_scores, **kwargs):
     def scorer(model, slice_name, fold):
         return scores[model.tag][fold]
 
-    return run_ablation(
+    return run_verification(
         scorer=scorer,
         model_factory=factory,
         variants={"v": {"tag": "v"}},
@@ -72,19 +72,20 @@ def _paired_run(baseline_scores, variant_scores, **kwargs):
         sanity_mutation=False,
         seed=0,
         effect_size=kwargs.pop("effect_size", 0.05),
+        policy=kwargs.pop("policy", None),
         **kwargs,
     )
 
 
-def test_underpowered_null_result_is_flagged_inconclusive():
+def test_underpowered_null_result_is_inconclusive_under_ablation():
     # Large per-fold differences that cancel out: no significant effect, and the
     # noise swamps a 0.03 margin. (Power depends on the paired *differences*,
     # not on how spread out the raw scores are.)
     base = [0.50, 0.80, 0.35, 0.75, 0.40, 0.70, 0.45, 0.65, 0.55, 0.60]
     var = [0.60, 0.71, 0.43, 0.64, 0.47, 0.64, 0.57, 0.57, 0.60, 0.52]
+    # Ablation accepts ON_PAR, so it demands proven equivalence (TOST).
     row = _paired_run(base, var, effect_size=0.03).summary.iloc[0]
-    assert row["label"] == "ON_PAR"
-    assert bool(row["adequately_powered"]) is False
+    assert row["label"] == "INCONCLUSIVE"
     assert bool(row["inconclusive"]) is True
     assert row["mde"] > 0.03  # cannot resolve the declared margin
 
@@ -104,7 +105,7 @@ def test_gate_summary_counts_underpowered_cells():
     base = [0.50, 0.80, 0.35, 0.75, 0.40, 0.70, 0.45, 0.65, 0.55, 0.60]
     var = [0.60, 0.71, 0.43, 0.64, 0.47, 0.64, 0.57, 0.57, 0.60, 0.52]
     report = _paired_run(base, var, effect_size=0.03).report
-    gate = report.get("non_inferiority")
+    gate = report.get("decision")
     assert gate.data["n_inconclusive"] == 1
     assert "underpowered" in gate.summary
 
@@ -123,7 +124,7 @@ def test_autoablate_returns_dataframe_with_report_in_attrs():
         variants={"weak_variant": {"scale": 0.2}},
         slices=["val_full", "slice_noisy"],
         input_shape=(4, DIM),
-        effect_size=0.05,
+        tolerance=0.05,
         seed=0,
     )
     assert isinstance(df, pd.DataFrame)
@@ -139,19 +140,22 @@ def test_autoablate_writes_summary_csv(tmp_path):
         slices=["val_full"],
         input_shape=(4, DIM),
         output_dir=str(out),
-        effect_size=0.05,
+        tolerance=0.05,
         seed=0,
     )
     assert (out / "summary.csv").exists()
 
 
-def test_on_par_everywhere_is_rejected():
-    """A variant must earn its place: no forward leap anywhere -> REJECTED."""
+def test_on_par_everywhere_splits_by_direction():
+    """The one difference between the policies, on identical evidence."""
+    from obelus.core.policy import AblationPolicy, InsertionPolicy
+
     base = [0.700, 0.702, 0.699, 0.701, 0.703, 0.698, 0.700, 0.702, 0.699, 0.701]
     var = [0.701, 0.701, 0.700, 0.700, 0.702, 0.699, 0.701, 0.701, 0.700, 0.700]
-    result = _paired_run(base, var, effect_size=0.03)
-    assert result.summary.iloc[0]["label"] == "ON_PAR"
-    assert result.report.get("non_inferiority").data["decisions"]["v"] == "REJECTED"
+    for policy, expected in [(AblationPolicy(), "RETAINED"), (InsertionPolicy(), "REJECTED")]:
+        result = _paired_run(base, var, effect_size=0.03, policy=policy)
+        assert result.summary.iloc[0]["label"] == "ON_PAR"
+        assert result.report.get("decision").data["decisions"]["v"] == expected
 
 
 def test_forward_leap_with_no_regression_is_retained():
@@ -159,4 +163,4 @@ def test_forward_leap_with_no_regression_is_retained():
     var = [0.70, 0.81, 0.89, 1.00, 1.10, 0.76, 0.84, 0.96, 1.04, 0.66]
     result = _paired_run(base, var, effect_size=0.10)
     assert result.summary.iloc[0]["label"] == "FORWARD"
-    assert result.report.get("non_inferiority").data["decisions"]["v"] == "RETAINED"
+    assert result.report.get("decision").data["decisions"]["v"] == "RETAINED"

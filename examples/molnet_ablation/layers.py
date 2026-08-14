@@ -1,14 +1,15 @@
-"""Composable architecture, assembled by Hydra from ``configs/architecture.yaml``.
+"""Composable architecture, assembled by Hydra from
+``configs/architecture_options.yaml``.
 
-Every submodule here is an independent **architectural decision**. Because each
-is a ``_target_`` in the config, ``obelus.core.discovery.generate_knockouts``
-finds it automatically and emits a variant that replaces it with
-``torch.nn.Identity`` — no ablation code, and no hand-written variant list.
+Every submodule here is an independent **architectural decision**, declared in
+the config as an ``_options_`` node listing its alternatives ordered simple ->
+complex. ``obelus.core.options.generate_moves`` turns those into variants — no
+ablation code, and no hand-written variant list.
 
-The knockout convention: a branch swapped to ``nn.Identity`` counts as *absent*
+The convention: a branch at its ``torch.nn.Identity`` option counts as *absent*
 (see :func:`_present`), so the fusion layer simply receives one fewer embedding.
-That is what makes a config-level ``_target_`` swap a real architectural change
-rather than a crash.
+That is what makes a config-level option swap a real architectural change rather
+than a crash.
 
 Layout::
 
@@ -19,7 +20,7 @@ Layout::
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -36,15 +37,6 @@ from obelus.core.contracts import check_invariants, check_shapes
 def _present(module: Optional[nn.Module]) -> bool:
     """A branch knocked out to ``nn.Identity`` is treated as absent."""
     return module is not None and not isinstance(module, nn.Identity)
-
-
-def _toggled_on(flag: Any) -> bool:
-    """Read an ``active:`` toggle, which discovery flips to ``False``."""
-    if flag is None:
-        return False
-    if isinstance(flag, bool):
-        return flag
-    return bool(flag.get("active", True))
 
 
 class DescriptorBranch(nn.Module):
@@ -67,8 +59,9 @@ class DescriptorBranch(nn.Module):
 class GraphEncoder(nn.Module):
     """Learned features: normalized graph convolutions over the atom graph.
 
-    ``residual`` is an ``active:`` toggle, so obelus generates a ``no_residual``
-    variant that severs the skip connections without touching this code.
+    ``residual`` is a plain constructor flag. To make it an ablation candidate,
+    declare it as an ``_options_`` node in the config — a toggle is a two-option
+    node like any other, needing no special support here.
     """
 
     def __init__(
@@ -76,10 +69,10 @@ class GraphEncoder(nn.Module):
         hidden: int = 64,
         layers: int = 2,
         in_dim: int = ATOM_FEAT_DIM,
-        residual: Any = None,
+        residual: bool = True,
     ):
         super().__init__()
-        self.residual = _toggled_on(residual)
+        self.residual = residual
         dims = [in_dim] + [hidden] * layers
         self.convs = nn.ModuleList(
             nn.Linear(dims[i], dims[i + 1]) for i in range(layers)

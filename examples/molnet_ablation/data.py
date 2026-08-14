@@ -2,9 +2,11 @@
 
 The dataset is ~1500 small molecules labeled active/inactive against human
 β-secretase 1 (BACE-1). We train each architecture **once** on a shared training
-pool, then probe it on disjoint *failure-mode cohorts* — each a distinct way a
-molecular classifier is known to break — held out from that pool. One split per
-failure mode, exactly as obelus's slice-based non-inferiority gate expects.
+pool, then probe it on *failure-mode cohorts* — each a distinct way a molecular
+classifier is known to break — held out from that pool. Cohorts overlap, so each
+one measures its own failure mode rather than "that mode, minus whatever an
+earlier cohort already claimed"; only ``in_distribution`` is exclusive, being the
+control for "no failure mode at all".
 """
 
 from __future__ import annotations
@@ -62,9 +64,10 @@ def build_dataset(
     *,
     holdout_frac: float = 0.15,
     cohort_cap: int = 150,
+    tail_support: float = 0.5,
     path: Path = DATA_PATH,
 ) -> Dataset:
-    """Load BACE and carve disjoint failure-mode slices out of a shared pool."""
+    """Load BACE and carve overlapping failure-mode slices out of a shared pool."""
     smiles, labels, mols = _load_rows(path)
     n = len(smiles)
     rng = np.random.default_rng(seed)
@@ -78,19 +81,29 @@ def build_dataset(
     assigned = np.zeros(n, dtype=bool)
     slices: dict[str, np.ndarray] = {}
 
-    def take(name: str, mask: np.ndarray, cap: int) -> None:
-        candidates = np.where(mask & ~assigned)[0]
+    def take(name: str, mask: np.ndarray, cap: int, *, support: float = 0.0) -> None:
+        candidates = np.where(mask)[0]
         rng.shuffle(candidates)
+        # Leave `support` of the tail in training. Holding a cohort out *entirely*
+        # (0 of the 162 largest molecules were ever seen) forces pure
+        # extrapolation, and where label prevalence also flips across the cut —
+        # 0.64 active above the size threshold vs 0.43 below — the model learns
+        # the relationship backwards and scores negative MCC on its own cohort.
+        cap = min(cap, int(round(len(candidates) * (1.0 - support))))
         chosen = candidates[:cap]
         slices[name] = np.sort(chosen)
-        assigned[chosen] = True
+        assigned[chosen] = True  # union of every cohort is held out of training
 
-    # Priority order matters: each molecule lands in exactly one cohort.
+    # Cohorts OVERLAP: a large, flexible molecule belongs in both, and forcing a
+    # winner would silently redefine `flexible` as "flexible but small" — the
+    # slice would no longer measure the failure mode it is named after. Sharing
+    # molecules makes the per-slice tests dependent, which is exactly what
+    # obelus.core.stats.select_correction detects.
     singleton = np.asarray([scaffold_counts[s] == 1 for s in scaffolds])
-    take("novel_scaffold", singleton, cohort_cap)
-    take("large", heavy >= np.quantile(heavy, 0.9), cohort_cap)
-    take("lipophilic", logp >= np.quantile(logp, 0.9), cohort_cap)
-    take("flexible", rotb >= np.quantile(rotb, 0.9), cohort_cap)
+    take("novel_scaffold", singleton, cohort_cap, support=tail_support)
+    take("large", heavy >= np.quantile(heavy, 0.9), cohort_cap, support=tail_support)
+    take("lipophilic", logp >= np.quantile(logp, 0.9), cohort_cap, support=tail_support)
+    take("flexible", rotb >= np.quantile(rotb, 0.9), cohort_cap, support=tail_support)
 
     remaining = np.where(~assigned)[0]
     rng.shuffle(remaining)

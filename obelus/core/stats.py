@@ -9,6 +9,7 @@ primitive, so there is exactly one place where the statistics live.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Hashable, Mapping, Optional, Sequence
 
 import numpy as np
 import scipy.stats as stats
@@ -16,11 +17,71 @@ import scipy.stats as stats
 __all__ = [
     "DegradationTest",
     "EffectClass",
+    "INCONCLUSIVE",
     "evaluate_non_inferiority",
     "classify_effect",
+    "label_effect",
+    "HOLM",
+    "NONE",
+    "select_correction",
+    "adjust_pvalues",
 ]
 
 FORWARD, ON_PAR, BACKWARD = "FORWARD", "ON_PAR", "BACKWARD"
+INCONCLUSIVE = "INCONCLUSIVE"  # not worse, not better, and equivalence unproven
+HOLM, NONE = "holm", "none"
+
+
+def select_correction(members: Optional[Mapping[str, Sequence[Hashable]]]) -> str:
+    """Holm only when slices are *shown* to share members, else none.
+
+    Correction is triggered by demonstrated overlap, never assumed: passing bare
+    slice names leaves it off, so supplying membership is what buys the
+    correction. Disjoint slices take none by project choice, which leaves FWER at
+    1-(1-alpha)**m (23% at m=5); return a step-down Sidak here to change that.
+
+    Holm, not Westfall-Young: WY learns the real dependence from a permutation
+    null coupled across slices, but each slice here resamples its folds
+    independently, so measured correlation is ~0.2, the union bound is already
+    near-tight, and WY moved no verdict at alpha=0.05. Holm assumes nothing and
+    costs one sort. Revisit WY if folds are ever coupled, or m grows much.
+    """
+    if members is None:
+        return NONE
+    seen: set = set()
+    for ids in members.values():
+        if seen & set(ids):
+            return HOLM
+        seen |= set(ids)
+    return NONE
+
+
+def adjust_pvalues(pvalues: Mapping[str, float], method: str) -> dict[str, float]:
+    """Step-down Holm adjusted p-values, still compared against a plain alpha.
+
+    Only for "**any** slice rejects" (union-intersection) rules; those needing
+    *every* slice -- the fire drill, the TOST bounds -- are already level-alpha.
+    """
+    if method == NONE:
+        return dict(pvalues)
+    ranked = sorted(pvalues.items(), key=lambda kv: kv[1])
+    adjusted, running = {}, 0.0
+    for i, (name, p) in enumerate(ranked):
+        running = max(running, min((len(ranked) - i) * p, 1.0))  # keep monotone
+        adjusted[name] = running
+    return adjusted
+
+
+def label_effect(p_backward, p_forward, is_equivalent, *, alpha, require_equivalence):
+    """The FORWARD/BACKWARD/INCONCLUSIVE/ON_PAR rule, in one place, so the
+    decision gate can relabel from *adjusted* p-values without restating it."""
+    if p_backward < alpha:
+        return BACKWARD
+    if p_forward < alpha:
+        return FORWARD
+    if require_equivalence and not is_equivalent:
+        return INCONCLUSIVE
+    return ON_PAR
 
 
 @dataclass(frozen=True)
@@ -125,11 +186,14 @@ def evaluate_non_inferiority(
 class EffectClass:
     """Where a variant lands relative to a *declared* meaningful effect size."""
 
-    label: str  # FORWARD | ON_PAR | BACKWARD
+    label: str  # FORWARD | ON_PAR | BACKWARD | INCONCLUSIVE
     p_forward: float
     p_backward: float
     baseline_mean: float
     variant_mean: float
+    p_not_worse: float  # evidence that effect > -delta   (TOST lower bound)
+    p_not_better: float  # evidence that effect < +delta   (TOST upper bound)
+    is_equivalent: bool  # both bounds established
 
 
 def classify_effect(
@@ -139,6 +203,7 @@ def classify_effect(
     alpha: float = 0.05,
     *,
     greater_is_better: bool = True,
+    require_equivalence: bool = False,
     seed: int | None = None,
 ) -> EffectClass:
     """Classify a variant against a meaningful ``effect_size`` delta.
@@ -154,6 +219,16 @@ def classify_effect(
     * ``BACKWARD`` — significantly worse than ``baseline - delta``
     * ``FORWARD``  — significantly better than ``baseline + delta``
     * ``ON_PAR``   — neither leap is established
+
+    With ``require_equivalence`` the ``ON_PAR`` bar is raised from *failure to
+    reject* to **proven equivalence** (TOST): both that the effect exceeds
+    ``-delta`` and that it falls short of ``+delta``. A cell that establishes
+    neither leap *nor* equivalence is ``INCONCLUSIVE`` — the honest label for a
+    slice too noisy to say anything. Callers that accept on ``ON_PAR`` (ablation)
+    need this; callers that decline on it (insertion) do not.
+
+    The two TOST bounds are the opposite tails of the two shifted tests already
+    being run, so this costs nothing extra.
     """
     if effect_size <= 0:
         raise ValueError("effect_size must be > 0; declare the delta that matters")
@@ -162,9 +237,21 @@ def classify_effect(
     kwargs = dict(alpha=alpha, greater_is_better=greater_is_better, seed=seed)
     back = evaluate_non_inferiority(b - shift, variant_scores, **kwargs)
     fwd = evaluate_non_inferiority(b + shift, variant_scores, **kwargs)
-    label = (
-        BACKWARD if back.p_degrade < alpha
-        else FORWARD if fwd.p_improve < alpha
-        else ON_PAR
+    # TOST: the two tails the leap tests discard bound the effect from each side.
+    p_not_worse = back.p_improve  # variant > baseline - delta
+    p_not_better = fwd.p_degrade  # variant < baseline + delta
+    is_equivalent = p_not_worse < alpha and p_not_better < alpha
+
+    return EffectClass(
+        label=label_effect(
+            back.p_degrade, fwd.p_improve, is_equivalent,
+            alpha=alpha, require_equivalence=require_equivalence,
+        ),
+        p_forward=fwd.p_improve,
+        p_backward=back.p_degrade,
+        baseline_mean=float(b.mean()),
+        variant_mean=back.variant_mean,
+        p_not_worse=p_not_worse,
+        p_not_better=p_not_better,
+        is_equivalent=is_equivalent,
     )
-    return EffectClass(label, fwd.p_improve, back.p_degrade, float(b.mean()), back.variant_mean)

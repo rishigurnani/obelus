@@ -181,3 +181,32 @@ def test_classification_respects_metric_direction():
     lower = [0.30, 0.41, 0.49, 0.61, 0.69]  # lower values
     assert classify_effect(base, lower, 0.10).label == "BACKWARD"  # F1: worse
     assert classify_effect(base, lower, 0.10, greater_is_better=False).label == "FORWARD"
+
+
+def test_equivalence_requires_proof_not_just_absence_of_a_leap():
+    """TOST: a tight slice proves ON_PAR; a noisy one admits it cannot tell."""
+    base = [0.50, 0.60, 0.70, 0.80, 0.90]
+    tight = [0.49, 0.59, 0.69, 0.78, 0.89]  # small, consistent -> provably within +/-0.1
+    noisy = [0.20, 0.90, 0.40, 0.95, 0.50]  # same rough mean, no resolution at all
+
+    assert classify_effect(base, tight, 0.10, require_equivalence=True).label == "ON_PAR"
+    assert classify_effect(base, noisy, 0.10, require_equivalence=True).label == "INCONCLUSIVE"
+    # Without the requirement both read ON_PAR — which is why ablation needs it.
+    assert classify_effect(base, noisy, 0.10).label == "ON_PAR"
+
+
+def test_equivalence_bounds_are_reported_both_sides():
+    base = [0.50, 0.60, 0.70, 0.80, 0.90]
+    tight = [0.49, 0.59, 0.69, 0.78, 0.89]
+    res = classify_effect(base, tight, 0.10, require_equivalence=True)
+    assert res.is_equivalent is True
+    assert res.p_not_worse < 0.05  # effect proven > -delta
+    assert res.p_not_better < 0.05  # effect proven < +delta
+
+
+def test_a_real_leap_is_never_relabelled_inconclusive():
+    base = [0.50, 0.60, 0.70, 0.80, 0.90]
+    big = [0.30, 0.41, 0.49, 0.61, 0.69]
+    gain = [0.70, 0.81, 0.89, 1.00, 1.10]
+    assert classify_effect(base, big, 0.10, require_equivalence=True).label == "BACKWARD"
+    assert classify_effect(base, gain, 0.10, require_equivalence=True).label == "FORWARD"

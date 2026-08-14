@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import pandas as pd
 from omegaconf import DictConfig
 
 from obelus.adapters import HydraModelFactory
-from obelus.core.discovery import generate_knockouts
+from obelus.core.options import generate_moves
+from obelus.core.policy import AblationPolicy, DecisionPolicy, InsertionPolicy
 from obelus.core.gates import FireDrillGate, default_gates
 from obelus.core.ladder import (
     Gate,
@@ -28,7 +29,7 @@ from obelus.core.ladder import (
 from obelus.core.seams import ModelFactory, Scorer
 from obelus.logging.tracker import NullTracker, Tracker
 
-__all__ = ["AblationResult", "run_ablation", "AutoAblate"]
+__all__ = ["AblationResult", "run_verification", "AutoAblate", "AutoInsert"]
 
 _SUMMARY_COLUMNS = [
     "variant",
@@ -39,6 +40,8 @@ _SUMMARY_COLUMNS = [
     "baseline_mean",
     "variant_mean",
     "mde",
+    "p_not_worse",
+    "p_not_better",
     "power_at_effect",
     "adequately_powered",
     "inconclusive",
@@ -61,23 +64,23 @@ class AblationResult:
     @property
     def retained(self) -> list[str]:
         """Variant names that were RETAINED (empty if the ladder halted early)."""
-        result = self.report.get("non_inferiority")
+        result = self.report.get("decision")
         if result is None:
             return []
         return [v for v, d in result.data["decisions"].items() if d == "RETAINED"]
 
 
 def _summary_frame(report: LadderReport) -> pd.DataFrame:
-    result = report.get("non_inferiority")
+    result = report.get("decision")
     rows = result.data["rows"] if result is not None else []
     return pd.DataFrame(rows, columns=_SUMMARY_COLUMNS)
 
 
-def run_ablation(
+def run_verification(
     cfg: Optional[DictConfig] = None,
     *,
     scorer: Scorer,
-    slices: list[str],
+    slices: "list[str] | Mapping[str, Sequence[Any]]",
     model_factory: Optional[ModelFactory] = None,
     variants: Optional[dict[str, dict[str, Any]]] = None,
     input_shape: Optional[tuple[int, ...]] = None,
@@ -87,6 +90,7 @@ def run_ablation(
     p_alpha: float = 0.05,
     greater_is_better: bool = True,
     effect_size: float,
+    policy: Optional[DecisionPolicy] = None,
     target_power: float = 0.8,
     mutator_fraction: float = 0.30,
     tracker: Optional[Tracker] = None,
@@ -134,7 +138,7 @@ def run_ablation(
 
     * **Hydra path** — pass ``cfg``. ``model_factory`` defaults to a
       :class:`~obelus.adapters.HydraModelFactory` (real ``hydra.utils.instantiate``)
-      and ``variants`` defaults to :func:`~obelus.core.discovery.generate_knockouts`
+      and ``variants`` defaults to :func:`~obelus.core.options.generate_moves`
       applied to ``cfg``.
     * **Direct/offline path** — pass ``model_factory`` and/or ``variants``
       explicitly. Anything passed directly overrides what would be derived from
@@ -156,15 +160,20 @@ def run_ablation(
         ``greater_is_better=False``. Must be deterministic given its inputs for
         reproducible results.
     slices:
-        Failure-mode slice names (e.g. ``["val_full", "slice_long_seq"]``).
-        **Required.** Passed verbatim to ``scorer`` as ``slice_name``.
+        Failure-mode slice names (e.g. ``["val_full", "slice_long_seq"]``), or a
+        mapping of name -> member ids. **Required.** Names are passed verbatim to
+        ``scorer`` as ``slice_name``. Passing membership is what enables the
+        family-wise correction: slices shown to share members make the per-slice
+        tests dependent, so the "any slice rejects" family then takes a Holm
+        correction (see :func:`obelus.core.stats.select_correction`). Bare names
+        leave it off, so this stays backwards compatible.
     model_factory:
         Callable ``overrides -> nn.Module`` building a model from a knockout
         override set. Defaults to a ``HydraModelFactory`` over ``cfg``.
     variants:
         Mapping of variant name to its flat ``{dotted.path: value}`` override
-        set. Defaults to knockouts discovered from ``cfg``. ``"baseline"`` is
-        added automatically if missing.
+        set. Defaults to the moves derived from ``cfg``'s ``_options_`` decision
+        nodes. ``"baseline"`` is added automatically if missing.
     input_shape:
         Full input shape *including the batch dimension*, e.g. ``(8, 16, 512)``.
         Drives the dummy tensors for gates 1–2. Ignored when ``example_input`` is
@@ -270,10 +279,11 @@ def run_ablation(
         if cfg is None:
             raise ValueError("provide either cfg or model_factory")
         model_factory = HydraModelFactory(cfg)
+    policy = policy or AblationPolicy()
     if variants is None:
         if cfg is None:
             raise ValueError("provide either cfg or variants")
-        variants = generate_knockouts(cfg)
+        variants = generate_moves(cfg, policy.direction)
     variants = {"baseline": {}, **variants}  # guarantee a baseline entry
 
     if gates is None:
@@ -281,18 +291,23 @@ def run_ablation(
     if not sanity_mutation:
         gates = [g for g in gates if not isinstance(g, FireDrillGate)]
 
+    # Passing the membership (name -> member ids) rather than bare names lets the
+    # decision gate see whether slices share members, and correct accordingly.
+    members = dict(slices) if isinstance(slices, Mapping) else None
+
     ctx = LadderContext(
-        baseline_model=model_factory(variants["baseline"]),
         model_factory=model_factory,
         variants=variants,
         scorer=scorer,
-        slices=slices,
+        slices=list(slices),
+        slice_members=members,
         folds=cv_folds,
         input_shape=input_shape,
         example_input=example_input,
         alpha=p_alpha,
         greater_is_better=greater_is_better,
         effect_size=effect_size,
+        policy=policy,
         target_power=target_power,
         mutator_fraction=mutator_fraction,
         tracker=tracker or NullTracker(),
@@ -302,47 +317,61 @@ def run_ablation(
     return AblationResult(report=report, summary=_summary_frame(report))
 
 
-def AutoAblate(
-    cfg: Optional[DictConfig] = None,
-    *,
-    scorer: Scorer,
-    slices: list[str],
-    cv_folds: int = 5,
-    sanity_mutation: bool = True,
-    p_alpha: float = 0.05,
-    db_path: Optional[str] = None,
-    output_dir: Optional[str] = None,
-    **kwargs: Any,
-) -> pd.DataFrame:
-    """Spec-facing convenience wrapper: run an ablation, return the summary.
-
-    ``db_path`` (if given) routes logging to a local SQLite MLflow store.
-    ``output_dir`` (if given) receives a ``summary.csv`` snapshot. The full
-    :class:`~obelus.core.ladder.LadderReport` is available as
-    ``summary_df.attrs["ladder_report"]``.
-    """
-    tracker: Optional[Tracker] = None
+def _auto(policy, cfg, effect_size, db_path, output_dir, kwargs):
+    """Shared body of the two direction wrappers."""
+    tracker = None
     if db_path is not None:
         from obelus.logging.mlflow_local import init_local_tracker
 
         tracker = init_local_tracker(db_path)
-
-    result = run_ablation(
-        cfg,
-        scorer=scorer,
-        slices=slices,
-        cv_folds=cv_folds,
-        sanity_mutation=sanity_mutation,
-        p_alpha=p_alpha,
-        tracker=tracker,
-        **kwargs,
+    result = run_verification(
+        cfg, policy=policy, effect_size=effect_size, tracker=tracker, **kwargs
     )
     summary = result.summary
     summary.attrs["ladder_report"] = result.report
-
     if output_dir is not None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         summary.to_csv(out / "summary.csv", index=False)
-
     return summary
+
+
+def AutoAblate(
+    cfg: Optional[DictConfig] = None,
+    *,
+    tolerance: float,
+    db_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Test **simplifications**: can this component be removed or made simpler?
+
+    A variant is RETAINED when no slice regresses by ``tolerance`` or more *and*
+    every slice positively establishes equivalence. Because acceptance rests on
+    "nothing was lost", a slice too noisy to prove that blocks the change rather
+    than waving it through.
+
+    ``tolerance`` is how much you are willing to give up in exchange for a
+    simpler model, in metric units (e.g. ``0.02`` F1).
+    """
+    return _auto(AblationPolicy(), cfg, tolerance, db_path, output_dir, kwargs)
+
+
+def AutoInsert(
+    cfg: Optional[DictConfig] = None,
+    *,
+    worthwhile_gain: float,
+    db_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Test **additions**: does this component earn the complexity it costs?
+
+    A variant is RETAINED only when it gains ``worthwhile_gain`` or more on at
+    least one slice and regresses on none. Being merely harmless is not enough —
+    the addition has to buy something.
+
+    ``worthwhile_gain`` is the improvement that would justify the extra cost, in
+    metric units (e.g. ``0.05`` F1).
+    """
+    return _auto(InsertionPolicy(), cfg, worthwhile_gain, db_path, output_dir, kwargs)

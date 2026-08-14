@@ -1,0 +1,56 @@
+# The same architecture, written in the ordered-options form — one config that
+# answers BOTH directions.
+#
+# Each decision node lists its alternatives ordered simple -> complex and names
+# the one currently in use. obelus derives:
+#
+#   AutoAblate  (simplify)   -> options ranked BELOW _current_
+#   AutoInsert  (complexify) -> options ranked ABOVE _current_
+#
+# The model below sits deliberately mid-stack: a descriptor MLP with the graph
+# encoder switched on, and both the SMILES Transformer and the learned fusion
+# switched off. So there is one thing to try removing and two to try adding.
+
+model:
+  _target_: examples.molnet_ablation.layers.HybridMolecularClassifier
+  hidden: 64
+
+  # Present today -> an ablation candidate ("are the 2D descriptors still needed?").
+  descriptor_branch:
+    _options_:
+      - {_target_: torch.nn.Identity}
+      - _target_: examples.molnet_ablation.layers.DescriptorBranch
+        in_dim: 16
+        hidden: 64
+        dropout: 0.2
+    _current_: 1
+
+  # Present today -> an ablation candidate ("can I drop the GNN?").
+  graph_encoder:
+    _options_:
+      - {_target_: torch.nn.Identity}
+      - _target_: examples.molnet_ablation.layers.GraphEncoder
+        hidden: 64
+        layers: 2
+        residual: true
+    _current_: 1
+
+  # Absent today -> an insertion candidate ("is a Transformer worth adding?").
+  sequence_encoder:
+    _options_:
+      - {_target_: torch.nn.Identity}
+      - _target_: examples.molnet_ablation.layers.SequenceEncoder
+        hidden: 64
+        d_model: 48
+        layers: 1
+        nhead: 4
+        dim_feedforward: 96
+        dropout: 0.1
+    _current_: 0
+
+  # Absent today (branches are mean-pooled) -> an insertion candidate.
+  fusion:
+    _options_:
+      - {_target_: torch.nn.Identity}
+      - {_target_: examples.molnet_ablation.layers.GatedFusion, hidden: 64}
+    _current_: 0

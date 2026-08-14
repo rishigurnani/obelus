@@ -31,7 +31,7 @@ def test_ablation_logs_runs_and_gate_metrics(monkeypatch, tmp_path):
         slices=["val_full", "slice_noisy"],
         input_shape=(4, DIM),
         db_path=db,
-        effect_size=0.05,
+        tolerance=0.05,
         seed=0,
     )
 
@@ -44,4 +44,4 @@ def test_ablation_logs_runs_and_gate_metrics(monkeypatch, tmp_path):
     assert len(runs) >= 3
 
     metric_cols = [c for c in runs.columns if c.startswith("metrics.gate.")]
-    assert any("non_inferiority" in c for c in metric_cols)
+    assert any("decision" in c for c in metric_cols)

@@ -20,7 +20,7 @@ class ModelFactory(Protocol):
     """Builds a model from knockout ``overrides`` applied to a base config.
 
     ``overrides`` is a flat mapping of dotted config paths to replacement values
-    (see :func:`obelus.core.discovery.generate_knockouts`). An empty mapping
+    (see :func:`obelus.core.options.generate_moves`). An empty mapping
     yields the baseline model.
     """
 

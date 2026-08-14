@@ -1,22 +1,40 @@
-# Example Hydra model config. Custom `src.*` modules and `active` toggles are
-# auto-discovered by obelus.core.discovery to build the knockout matrix.
+# Example Hydra model config in obelus's ordered-options form: every decision
+# point lists its alternatives ordered simple -> complex, and `_current_` names
+# the one in force. obelus derives ablations (ranks below `_current_`) and
+# insertions (ranks above) from that single declaration.
 #
 # The architecture lives under a top-level `model:` key, which is what
-# generate_knockouts() and HydraModelFactory read.
-# See examples/configs/architecture.yaml for a fully runnable version.
+# generate_moves() and HydraModelFactory read.
+# See examples/configs/architecture_options.yaml for a fully runnable version.
 model:
   _target_: src.models.Transformer
   dim: 512
   depth: 6
+
+  # Present today -> an ablation candidate. Swapping a _target_ to Identity is
+  # just the rank-0 option; there is no separate "knockout" concept.
   attn:
-    _target_: src.layers.CustomAttention
-    dim: 512
+    _options_:
+      - {_target_: torch.nn.Identity}
+      - {_target_: src.layers.CustomAttention, dim: 512}
+    _current_: 1
+
   ffn:
-    _target_: src.layers.GatedFFN
-    dim: 512
+    _options_:
+      - {_target_: torch.nn.Identity}
+      - {_target_: src.layers.GatedFFN, dim: 512}
+    _current_: 1
+
+  # A module with no alternatives declared is simply not a decision point. That
+  # is why obelus needs no prefix heuristic to tell library layers from yours:
+  # nothing is discovered, everything is declared.
   norm:
-    _target_: torch.nn.LayerNorm  # library module: not ablated
+    _target_: torch.nn.LayerNorm
     normalized_shape: 512
+
+  # An on/off toggle is a two-option node like any other.
   dropout:
-    active: true
-    p: 0.1
+    _options_:
+      - {p: 0.0}
+      - {p: 0.1}
+    _current_: 1
